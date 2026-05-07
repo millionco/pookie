@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MCP_PRESETS, resolveShimName } from "../server/mcp/presets";
 import { resolveShim } from "../server/mcp/shims";
-import { RIPPLING_API_BASE_URL } from "../server/mcp/shims/constants";
+import {
+  RIPPLING_API_BASE_URL,
+  RIPPLING_TOKEN_HELP_URL,
+} from "../server/mcp/shims/constants";
 import {
   buildRipplingTools,
   validateRipplingShim,
@@ -74,6 +77,27 @@ describe("rippling preset wiring", () => {
     expect(typeof shim?.buildTools).toBe("function");
     expect(typeof shim?.validate).toBe("function");
   });
+
+  it("resolves aliased instances (rippling_finance) to the same shim", () => {
+    expect(resolveShimName("rippling_finance")).toBe("rippling");
+    expect(resolveShimName("rippling_personal")).toBe("rippling");
+    expect(resolveShimName("RIPPLING")).toBe("rippling");
+  });
+
+  it("does not resolve unrelated names to the rippling shim", () => {
+    expect(resolveShimName("linear")).toBeUndefined();
+    expect(resolveShimName("rippling-no")).toBeUndefined();
+    expect(resolveShimName("rip")).toBeUndefined();
+  });
+
+  it("excludes the heaviest paginated tools from search subagent visibility", () => {
+    const searchTools = MCP_PRESETS.rippling.searchTools ?? [];
+    expect(searchTools).not.toContain("list_employees_including_terminated");
+    expect(searchTools).not.toContain("list_leave_balances");
+    expect(searchTools).not.toContain("get_leave_balance");
+    expect(searchTools).toContain("list_employees");
+    expect(searchTools).toContain("list_leave_requests");
+  });
 });
 
 describe("buildRipplingTools", () => {
@@ -143,9 +167,80 @@ describe("buildRipplingTools", () => {
     expect(result.type).toBe("error");
     if (result.type !== "error") return;
     expect(result.error.code).toBe("rippling_unauthorized");
-    expect(result.error.instructions).toContain(
-      "https://app.rippling.com/developer/apiKeys",
+    expect(result.error.instructions).toContain(RIPPLING_TOKEN_HELP_URL);
+  });
+
+  it("maps an AbortError-driven timeout to a friendly tool error", async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.fn(
+      (_url: unknown, init: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener("abort", () => {
+            const abortError = new Error("This operation was aborted");
+            abortError.name = "AbortError";
+            reject(abortError);
+          });
+        }),
     );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const tools = buildRipplingTools("rippling-key");
+    const promise = runTool(tools.get_current_company, {}, "call_timeout");
+    await vi.advanceTimersByTimeAsync(20000);
+    const result = await promise;
+
+    expect(result.type).toBe("error");
+    if (result.type !== "error") return;
+    expect(result.error.code).toBe("rippling_timeout");
+    expect(result.error.message).toContain("timed out");
+
+    vi.useRealTimers();
+  });
+
+  it("strips heavy fields from list_employees output projection", async () => {
+    const heavyEmployee = {
+      id: "role_1",
+      name: "Alice",
+      workEmail: "alice@example.com",
+      roleState: "ACTIVE",
+      photo: "data:image/png;base64,AAAAAAAAA".repeat(1000),
+      smallPhoto: "data:image/png;base64,BBBB".repeat(100),
+      workSchedule: { MONDAY: { hours: 8 }, TUESDAY: { hours: 8 } },
+      customFields: { Marital_Status: "Married", Tshirt: "L" },
+    };
+    stubFetchOnce({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      body: [heavyEmployee],
+    });
+
+    const tools = buildRipplingTools("rippling-key");
+    const tool = tools.list_employees;
+    const outcome = await runTool(tool, { limit: 1 }, "call_proj");
+    expect(outcome.type).toBe("success");
+
+    if (!tool.toModelOutput) throw new Error("tool missing toModelOutput");
+    const modelOutput = tool.toModelOutput({
+      toolCallId: "call_proj",
+      input: { limit: 1 },
+      output: outcome,
+    });
+    const rendered =
+      typeof modelOutput === "string"
+        ? modelOutput
+        : (modelOutput as { value: string }).value;
+
+    expect(rendered).toContain("alice@example.com");
+    expect(rendered).toContain("1 employee(s)");
+    // Heavy fields must NOT be in the model-facing output
+    expect(rendered).not.toContain("photo");
+    expect(rendered).not.toContain("workSchedule");
+    expect(rendered).not.toContain("customFields");
+    // But the raw success result still has the original payload
+    if (outcome.type === "success") {
+      expect(outcome.result).toEqual([heavyEmployee]);
+    }
   });
 
   it("forwards leave-request filters as query params", async () => {
@@ -210,8 +305,6 @@ describe("validateRipplingShim", () => {
     const result = await validateRipplingShim("bad-token");
     expect(result.ok).toBe(false);
     expect(result.message).toContain("rejected the API key");
-    expect(result.message).toContain(
-      "https://app.rippling.com/developer/apiKeys",
-    );
+    expect(result.message).toContain(RIPPLING_TOKEN_HELP_URL);
   });
 });

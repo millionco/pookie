@@ -247,22 +247,24 @@ export const MCP_PRESETS: Record<string, McpPreset> = {
     url: "https://api.rippling.com",
     description: "hr, employees, leave",
     authType: "token",
-    tokenHelpUrl: "https://app.rippling.com/developer/apiKeys",
+    tokenHelpUrl: "https://developer.rippling.com/",
     shim: "rippling",
+    // Subset deliberately excludes the three heaviest paginated calls
+    // (list_employees_including_terminated, list_leave_balances,
+    // get_leave_balance). The search subagent runs sequential
+    // explorations and these endpoints can return tens of thousands of
+    // tokens of JSON — the main agent can still call them when the
+    // user explicitly asks about former employees or PTO balances.
     searchTools: [
       "list_employees",
       "get_employee",
-      "list_employees_including_terminated",
+      "list_leave_requests",
       "get_current_company",
       "get_departments",
-      "get_work_locations",
       "get_teams",
       "get_levels",
       "get_company_leave_types",
       "get_current_user",
-      "list_leave_balances",
-      "get_leave_balance",
-      "list_leave_requests",
     ],
     exampleQueries: [
       "who's out on leave this week according to rippling?",

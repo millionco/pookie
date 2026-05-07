@@ -61,6 +61,23 @@ const collectConnectedPresetNames = (
   return names;
 };
 
+const presetAddInvocation = (preset: {
+  name: string;
+  authType?: string;
+}): string =>
+  preset.authType === "token"
+    ? `\`/mcp-add ${preset.name} <api-key>\``
+    : `\`/mcp-add ${preset.name}\``;
+
+const describeOffPreset = (preset: {
+  name: string;
+  description: string;
+  authType?: string;
+}): string => {
+  const tokenSuffix = preset.authType === "token" ? " (requires API key)" : "";
+  return `- ${preset.name}: ${preset.description}${tokenSuffix} → ${presetAddInvocation(preset)}`;
+};
+
 const buildAvailableMcpPresetsSection = (
   connectedServers: McpServerSummary[] | undefined,
 ): string | undefined => {
@@ -68,11 +85,11 @@ const buildAvailableMcpPresetsSection = (
 
   const offPresetLines = Object.values(MCP_PRESETS)
     .filter((preset) => !connectedPresets.has(preset.name))
-    .map((preset) => `- ${preset.name}: ${preset.description}`);
+    .map(describeOffPreset);
 
   if (offPresetLines.length === 0) return undefined;
 
-  return `<available_mcp_presets>\nnot connected. if the user wants one of these capabilities, offer \`/mcp-add <name>\` rather than faking the call.\n${offPresetLines.join("\n")}\n</available_mcp_presets>`;
+  return `<available_mcp_presets>\nnot connected. if the user wants one of these capabilities, offer the matching invocation rather than faking the call. token presets need an API key inline.\n${offPresetLines.join("\n")}\n</available_mcp_presets>`;
 };
 
 export interface SystemReminderContext {
