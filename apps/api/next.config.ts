@@ -39,6 +39,23 @@ const nextConfig: NextConfig = {
           { key: "Referrer-Policy", value: "no-referrer" },
         ],
       },
+      // The /a/:token route renders untrusted, model-generated HTML inside a
+      // sandboxed iframe (sandbox="allow-scripts" only — no allow-same-origin).
+      // The outer page itself stays minimal: just an iframe wrapper. Prevent
+      // other origins from framing the wrapper so a clickjacker can't trick a
+      // signed-in user into interacting with the embedded app.
+      {
+        source: "/a/:token",
+        headers: [
+          {
+            key: "Content-Security-Policy",
+            value: "frame-ancestors 'self'",
+          },
+          { key: "X-Frame-Options", value: "SAMEORIGIN" },
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "Cache-Control", value: "private, no-store" },
+        ],
+      },
     ];
   },
   rewrites: async () => {

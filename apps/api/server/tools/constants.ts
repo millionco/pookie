@@ -47,3 +47,22 @@ export const SLACK_FILE_CONTENT_MAX_BYTES = 1_000_000;
 export const SLACK_FILE_CONTENT_MAX_CHARS = 12_000;
 
 export const SLACK_CANVAS_MARKDOWN_MAX_CHARS = 50_000;
+
+export const MAX_HTML_BYTES = 262_144;
+export const HTML_APP_TTL_S = 60 * 60 * 24 * 30;
+// Iframe sandbox is the load-bearing isolation. This allowlist is informational
+// for now — it documents which CDNs the system prompt encourages the model to
+// use (so apps render predictably) and seeds the meta-CSP we may inject into
+// stored HTML in a future hardening pass. Keep `https:` in mind: the sandbox
+// already blocks credentialed cross-origin access, so loose CDN access is an
+// acceptable starting posture.
+export const HTML_APP_CDN_ALLOWLIST: readonly string[] = [
+  "https://cdn.tailwindcss.com",
+  "https://cdn.jsdelivr.net",
+  "https://unpkg.com",
+  "https://esm.sh",
+  "https://fonts.googleapis.com",
+  "https://fonts.gstatic.com",
+];
+export const HTML_APP_LOCAL_DEV_BASE_URL = "http://localhost:3000";
+export const HTML_APP_TOKEN_TTL_S = HTML_APP_TTL_S;

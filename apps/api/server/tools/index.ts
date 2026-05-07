@@ -1,6 +1,7 @@
 import { resolvePreset } from "../mcp/presets";
 import { createProvider } from "../openai-provider";
 import { sanitizeMcpToolArgs } from "../utils/sanitize-mcp-tool-args";
+import { createHtmlAppTool } from "./html-app";
 import { forget, recall, remember } from "./memory";
 import { search } from "./search";
 import { slackChannelTools } from "./slack-channel";
@@ -87,6 +88,12 @@ export const buildToolset = (
     remember: remember(context.state, context.teamId),
     recall: recall(context.state, context.teamId),
     forget: forget(context.state, context.teamId),
+    create_html_app: createHtmlAppTool({
+      state: context.state,
+      teamId: context.teamId,
+      userId: context.userId,
+      channelId: context.channelId,
+    }),
   };
 
   const mcpSearchToolSources: McpSearchToolSource[] = (
