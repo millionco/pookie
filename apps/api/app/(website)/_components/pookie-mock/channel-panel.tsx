@@ -20,6 +20,7 @@ import { MobileSidebarDrawer } from "./mobile-sidebar-drawer";
 import { ReactionCountButton } from "./reaction-count-button";
 import { cx, panelShadow } from "./styles";
 
+import type EmojiPickerModule from "emoji-picker-react";
 import type { EmojiClickData, EmojiStyle, Theme } from "emoji-picker-react";
 
 const EmojiPicker = dynamic(() => import("emoji-picker-react"), {
@@ -27,7 +28,7 @@ const EmojiPicker = dynamic(() => import("emoji-picker-react"), {
 });
 
 let emojiPickerPreloadPromise:
-  | Promise<typeof import("emoji-picker-react")>
+  | Promise<{ default: typeof EmojiPickerModule }>
   | undefined;
 
 const preloadEmojiPicker = () => {
