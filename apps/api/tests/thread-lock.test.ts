@@ -76,40 +76,52 @@ const createTestContext = () => {
 
   const testLayer = ThreadLock.layer.pipe(Layer.provide(fakeRedisLayer))
 
-  const run = <T>(
-    effectFn: (threadLock: {
-      acquire: ReturnType<typeof ThreadLock.prototype.acquire>
-      release: ReturnType<typeof ThreadLock.prototype.release>
-      enqueueFollowUp: ReturnType<typeof ThreadLock.prototype.enqueueFollowUp>
-      drainFollowUps: ReturnType<typeof ThreadLock.prototype.drainFollowUps>
-      removeDeletedFollowUp: ReturnType<typeof ThreadLock.prototype.removeDeletedFollowUp>
-      tryMarkReauthNoticeSent: ReturnType<typeof ThreadLock.prototype.tryMarkReauthNoticeSent>
-    }) => Effect.Effect<T, unknown>,
-  ) =>
-    Effect.runPromise(
-      Effect.gen(function* () {
-        const threadLock = yield* ThreadLock
-        return yield* effectFn(threadLock)
-      }).pipe(Effect.provide(testLayer)),
-    )
+  const provide = <T>(effect: Effect.Effect<T, unknown, ThreadLock>) =>
+    Effect.runPromise(effect.pipe(Effect.provide(testLayer)))
 
   const acquire = (threadId: string) =>
-    run((threadLock) => threadLock.acquire(threadId))
+    provide(
+      Effect.gen(function* () {
+        const threadLock = yield* ThreadLock
+        return yield* threadLock.acquire(threadId)
+      }),
+    )
 
   const release = (threadId: string) =>
-    run((threadLock) => threadLock.release(threadId))
+    provide(
+      Effect.gen(function* () {
+        const threadLock = yield* ThreadLock
+        return yield* threadLock.release(threadId)
+      }),
+    )
 
   const enqueue = (
     threadId: string,
     channelId: string,
     followUp: { messageId: string; text: string },
-  ) => run((threadLock) => threadLock.enqueueFollowUp(threadId, channelId, followUp))
+  ) =>
+    provide(
+      Effect.gen(function* () {
+        const threadLock = yield* ThreadLock
+        return yield* threadLock.enqueueFollowUp(threadId, channelId, followUp)
+      }),
+    )
 
   const drain = (threadId: string) =>
-    run((threadLock) => threadLock.drainFollowUps(threadId))
+    provide(
+      Effect.gen(function* () {
+        const threadLock = yield* ThreadLock
+        return yield* threadLock.drainFollowUps(threadId)
+      }),
+    )
 
   const removeDeleted = (channelId: string, deletedTs: string) =>
-    run((threadLock) => threadLock.removeDeletedFollowUp(channelId, deletedTs))
+    provide(
+      Effect.gen(function* () {
+        const threadLock = yield* ThreadLock
+        return yield* threadLock.removeDeletedFollowUp(channelId, deletedTs)
+      }),
+    )
 
   return { acquire, release, enqueue, drain, removeDeleted, store, lists }
 }
