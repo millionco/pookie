@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Cause, Effect } from "effect"
 
 import { Redis } from "../../infra/redis"
 
@@ -58,7 +58,7 @@ export const saveOnboardingState = (
   }).pipe(
     Effect.catchCause((cause) =>
       Effect.logWarning("[onboarding] failed to save state").pipe(
-        Effect.annotateLogs({ error: String(cause) }),
+        Effect.annotateLogs({ error: Cause.pretty(cause) }),
       ),
     ),
   )

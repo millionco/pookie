@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Cause, Effect } from "effect"
 
 import { MCP_PRESETS, getPresetDisplayName } from "../mcp/presets"
 import { Redis } from "../infra/redis"
@@ -26,7 +26,7 @@ const markWelcomeSent = (teamId: string) =>
   }).pipe(
     Effect.catchCause((cause) =>
       Effect.logWarning("[welcome] failed to persist welcome flag").pipe(
-        Effect.annotateLogs({ error: String(cause) }),
+        Effect.annotateLogs({ error: Cause.pretty(cause) }),
       ),
     ),
   )

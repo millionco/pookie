@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { Cause, Effect } from "effect";
 import * as AI from "ai";
 import * as ChatSDK from "chat";
 import { z } from "zod";
@@ -361,9 +361,9 @@ const runAgentRound = Effect.fn("Agent.runAgentRound")(
           try: () => thread.post({ markdown: GENERIC_ERROR_MARKDOWN }),
           catch: (cause) => new AgentStreamError({ cause }),
         }).pipe(
-          Effect.catchCause((postError) =>
+          Effect.catchCause((postCause) =>
             Effect.logWarning("[agent] failed to post error message").pipe(
-              Effect.annotateLogs({ error: String(postError) }),
+              Effect.annotateLogs({ error: Cause.pretty(postCause) }),
             ),
           ),
         );
@@ -376,11 +376,11 @@ const runAgentRound = Effect.fn("Agent.runAgentRound")(
         },
         catch: (cause) => new AgentStreamError({ cause }),
       }).pipe(
-        Effect.catchCause((responseError) =>
+        Effect.catchCause((responseCause) =>
           Effect.gen(function* () {
             yield* Effect.logWarning(
               "[agent] failed to get response messages",
-            ).pipe(Effect.annotateLogs({ error: String(responseError) }));
+            ).pipe(Effect.annotateLogs({ error: Cause.pretty(responseCause) }));
             return null;
           }),
         ),
@@ -407,11 +407,11 @@ const runAgentRound = Effect.fn("Agent.runAgentRound")(
       const encryptedState = yield* secureStore
         .encryptJson(updatedMessages)
         .pipe(
-          Effect.catchCause((encryptError) =>
+          Effect.catchCause((encryptCause) =>
             Effect.gen(function* () {
               yield* Effect.logWarning(
                 "[agent] failed to encrypt thread state",
-              ).pipe(Effect.annotateLogs({ error: String(encryptError) }));
+              ).pipe(Effect.annotateLogs({ error: Cause.pretty(encryptCause) }));
               return null;
             }),
           ),
@@ -422,9 +422,9 @@ const runAgentRound = Effect.fn("Agent.runAgentRound")(
           try: () => thread.setState({ messages: encryptedState }),
           catch: (cause) => new AgentStreamError({ cause }),
         }).pipe(
-          Effect.catchCause((stateError) =>
+          Effect.catchCause((stateCause) =>
             Effect.logWarning("[agent] failed to persist thread state").pipe(
-              Effect.annotateLogs({ error: String(stateError) }),
+              Effect.annotateLogs({ error: Cause.pretty(stateCause) }),
             ),
           ),
         );
@@ -685,9 +685,9 @@ export const handleSlackMessage = (
               postTraceFooter(thread, traceId, Date.now() - startedAt),
             catch: (cause) => new AgentStreamError({ cause }),
           }).pipe(
-            Effect.catchCause((traceError) =>
+            Effect.catchCause((traceCause) =>
               Effect.logWarning("[agent] failed to post trace footer").pipe(
-                Effect.annotateLogs({ error: String(traceError) }),
+                Effect.annotateLogs({ error: Cause.pretty(traceCause) }),
               ),
             ),
           );
@@ -704,17 +704,17 @@ export const handleSlackMessage = (
               try: () => mcpHandle!.close(),
               catch: (cause) => new AgentStreamError({ cause }),
             }).pipe(
-              Effect.catchCause((closeError) =>
+              Effect.catchCause((closeCause) =>
                 Effect.logWarning("[mcp] close error").pipe(
-                  Effect.annotateLogs({ error: String(closeError) }),
+                  Effect.annotateLogs({ error: Cause.pretty(closeCause) }),
                 ),
               ),
             );
           }
           yield* threadLock.release(thread.id).pipe(
-            Effect.catchCause((lockError) =>
+            Effect.catchCause((lockCause) =>
               Effect.logWarning("[agent] failed to release thread lock").pipe(
-                Effect.annotateLogs({ error: String(lockError) }),
+                Effect.annotateLogs({ error: Cause.pretty(lockCause) }),
               ),
             ),
           );

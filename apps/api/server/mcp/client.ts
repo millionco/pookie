@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Cause, Effect } from "effect"
 import { auth, createMCPClient } from "@ai-sdk/mcp"
 
 import { McpAuthError, McpConnectionError } from "../errors"
@@ -183,25 +183,25 @@ const ensureOAuth = (
                 cause instanceof Error ? cause.message : String(cause),
             }),
     }).pipe(
-      Effect.catchCause((error) =>
-        Effect.gen(function* () {
-          if (!(error instanceof McpOAuthRedirectError)) {
-            return yield* Effect.fail(error)
-          }
-          // auth() wanted to redirect despite us having tokens. Re-check Redis
-          // (auth may have called invalidateCredentials("all"), clearing them).
-          const currentTokens = yield* loadOAuthTokensWithFallback(
-            ownerId,
-            userId,
-            config.name,
-            teamId,
-          )
-          if (currentTokens) {
-            yield* clearPendingAuthUrl(userId, config.name, teamId)
-            return
-          }
-          return yield* Effect.fail(error)
-        }),
+      Effect.catchIf(
+        (error): error is McpOAuthRedirectError =>
+          error instanceof McpOAuthRedirectError,
+        (redirectError) =>
+          Effect.gen(function* () {
+            // auth() wanted to redirect despite us having tokens. Re-check Redis
+            // (auth may have called invalidateCredentials("all"), clearing them).
+            const currentTokens = yield* loadOAuthTokensWithFallback(
+              ownerId,
+              userId,
+              config.name,
+              teamId,
+            )
+            if (currentTokens) {
+              yield* clearPendingAuthUrl(userId, config.name, teamId)
+              return
+            }
+            return yield* Effect.fail(redirectError)
+          }),
       ),
     )
   })
@@ -257,13 +257,14 @@ export const tryRegister = Effect.fn("McpClient.tryRegister")(
         return { connected: true, toolCount } as McpRegistrationResult
       }),
     ).pipe(
-      Effect.catchCause((error) =>
-        error instanceof McpOAuthRedirectError
-          ? Effect.succeed({
-              connected: false,
-              authorizationUrl: error.authorizationUrl,
-            } as McpRegistrationResult)
-          : Effect.fail(error),
+      Effect.catchIf(
+        (error): error is McpOAuthRedirectError =>
+          error instanceof McpOAuthRedirectError,
+        (redirectError) =>
+          Effect.succeed({
+            connected: false,
+            authorizationUrl: redirectError.authorizationUrl,
+          } as McpRegistrationResult),
       ),
     ),
 )
@@ -414,8 +415,16 @@ export const openMcpTools = Effect.fn("McpClient.openMcpTools")(
             }
             serverSummaries.push({ name: config.name, toolCount })
           }).pipe(
-            Effect.catchCause((error) => {
-              classifyError(config, error)
+            Effect.catchIf(
+              (error): error is McpOAuthRedirectError =>
+                error instanceof McpOAuthRedirectError,
+              (redirectError) => {
+                classifyError(config, redirectError)
+                return Effect.void
+              },
+            ),
+            Effect.catchCause((cause) => {
+              classifyError(config, Cause.squash(cause))
               return Effect.void
             }),
           ),
