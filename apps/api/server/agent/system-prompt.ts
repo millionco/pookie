@@ -1,6 +1,7 @@
 import { env } from "@/env";
 
 import { renderPersonalitySection, resolveConfig } from "../config";
+import { appRuntime } from "../runtime";
 import {
   loadChannelMemories,
   loadGlobalMemories,
@@ -198,7 +199,7 @@ export const buildSystemMessages = async (
       loadMemories(state, teamId, userId),
       loadChannelMemories(state, teamId, channelId),
       loadGlobalMemories(state, teamId),
-      resolveConfig({ teamId, userId, channelId }),
+      appRuntime.runPromise(resolveConfig({ teamId, userId, channelId })),
     ]);
 
   const runtimeContext = buildRuntimeContextSection(userId, channelId);

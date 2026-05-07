@@ -14,6 +14,8 @@
   "dependencies": {
     "@ai-sdk/mcp": "^1.0.37",
     "@ai-sdk/openai": "^3.0.54",
+    "@effect/platform-node": "4.0.0-beta.35",
+    "@effect/platform-node-shared": "4.0.0-beta.35",
     "@base-ui/react": "^1.4.1",
     "@chat-adapter/slack": "^4.26.0",
     "@chat-adapter/state-memory": "^4.26.0",
@@ -42,6 +44,7 @@
     "clsx": "^2.1.1",
     "cryptr": "^6.4.0",
     "defuddle": "^0.18.1",
+    "effect": "4.0.0-beta.35",
     "emoji-picker-react": "^4.19.1",
     "ioredis": "^5.4.1",
     "ipaddr.js": "^2.4.0",

@@ -7,17 +7,17 @@ import {
   parseOptions,
   parseSubcommandArgs,
 } from "../utils/parse-slash-command-args";
-import { tryRegister } from "./client";
+import { tryRegisterAsync } from "./client";
 import { SERVER_NAME_REGEX } from "./constants";
 import { initiateGitHubOAuth, isGitHubOAuthConfigured } from "./github-oauth";
 import { getPresetDisplayName, MCP_PRESETS, resolvePreset } from "./presets";
 import {
-  clearOAuthArtifacts,
-  listVisibleServers,
+  clearOAuthArtifactsAsync,
+  listVisibleServersAsync,
   oauthOwnerId,
-  removeServerConfig,
-  saveOAuthAuthorizationLink,
-  saveServerConfig,
+  removeServerConfigAsync,
+  saveOAuthAuthorizationLinkAsync,
+  saveServerConfigAsync,
 } from "./store";
 import { validateAuthorizationUrl } from "./validate-authorization-url";
 import { validateMcpServerUrl } from "./validate-server-url";
@@ -113,7 +113,7 @@ export const createAuthorizationStartUrl = async (
   }
 
   const linkToken = crypto.randomUUID();
-  await saveOAuthAuthorizationLink(linkToken, { serverName, authorizationUrl });
+  await saveOAuthAuthorizationLinkAsync(linkToken, { serverName, authorizationUrl });
 
   const startUrl = new URL("/mcp/oauth/start", env.BASE_URL);
   startUrl.searchParams.set("token", linkToken);
@@ -266,8 +266,8 @@ const handleAdd = async (
     ...(effectiveToken ? { token: effectiveToken } : {}),
   };
 
-  await saveServerConfig(config);
-  await clearOAuthArtifacts(
+  await saveServerConfigAsync(config);
+  await clearOAuthArtifactsAsync(
     event.user.userId,
     serverName,
     teamId,
@@ -303,7 +303,7 @@ const handleAdd = async (
   await reply(event, `connecting to ${serverName}...`);
 
   try {
-    const result = await tryRegister(event.user.userId, config, teamId);
+    const result = await tryRegisterAsync(event.user.userId, config, teamId);
 
     if (result.connected) {
       await reply(
@@ -330,7 +330,7 @@ const handleAdd = async (
 
 interface ServerStatusContext {
   server: McpServerConfig;
-  result?: Awaited<ReturnType<typeof tryRegister>>;
+  result?: Awaited<ReturnType<typeof tryRegisterAsync>>;
   errorMessage?: string;
 }
 
@@ -354,7 +354,7 @@ const collectServerStatuses = async (
 
   for (const server of servers) {
     try {
-      const result = await tryRegister(event.user.userId, server, teamId);
+      const result = await tryRegisterAsync(event.user.userId, server, teamId);
       contexts.push({ server, result });
       if (!result.connected && result.authorizationUrl) {
         pendingAuth.push({
@@ -419,7 +419,7 @@ const listServersOrReplyEmpty = async (
     await reply(event, "could not determine workspace. try again.");
     return null;
   }
-  const servers = await listVisibleServers(
+  const servers = await listVisibleServersAsync(
     event.user.userId,
     channelId,
     teamId,
@@ -462,7 +462,7 @@ const handleList = async (event: SlashCommandEvent): Promise<void> => {
     return;
   }
 
-  const servers = await listVisibleServers(
+  const servers = await listVisibleServersAsync(
     event.user.userId,
     channelId,
     teamId,
@@ -540,10 +540,10 @@ const handleRemove = async (
     args.isGlobal,
   );
 
-  const didRemove = await removeServerConfig(scope, serverName);
+  const didRemove = await removeServerConfigAsync(scope, serverName);
 
   if (didRemove) {
-    await clearOAuthArtifacts(
+    await clearOAuthArtifactsAsync(
       event.user.userId,
       serverName,
       teamId,

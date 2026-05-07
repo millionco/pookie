@@ -1,45 +1,50 @@
-import { logger } from "../utils/logger";
-
-const activeRuns = new Map<string, AbortController>();
+import { Effect, Layer, ServiceMap } from "effect"
 
 const runKey = (channelId: string, messageTs: string): string =>
-  `${channelId}:${messageTs}`;
+  `${channelId}:${messageTs}`
 
-export const registerActiveRun = (
-  channelId: string,
-  messageTs: string,
-): AbortController => {
-  const key = runKey(channelId, messageTs);
-  const existing = activeRuns.get(key);
-  if (existing) {
-    existing.abort();
-  }
+export class ActiveRuns extends ServiceMap.Service<ActiveRuns>()(
+  "@pookie/ActiveRuns",
+  {
+    make: Effect.sync(() => {
+      const activeRuns = new Map<string, AbortController>()
 
-  const controller = new AbortController();
-  activeRuns.set(key, controller);
-  return controller;
-};
+      return {
+        register: (channelId: string, messageTs: string) =>
+          Effect.sync(() => {
+            const key = runKey(channelId, messageTs)
+            const existing = activeRuns.get(key)
+            if (existing) {
+              existing.abort()
+            }
 
-export const abortActiveRun = (
-  channelId: string,
-  messageTs: string,
-): boolean => {
-  const key = runKey(channelId, messageTs);
-  const controller = activeRuns.get(key);
-  if (!controller) return false;
+            const controller = new AbortController()
+            activeRuns.set(key, controller)
+            return controller
+          }),
 
-  logger.info("[active-runs] aborting run for deleted message", {
-    channelId,
-    messageTs,
-  });
-  controller.abort();
-  activeRuns.delete(key);
-  return true;
-};
+        abort: (channelId: string, messageTs: string) =>
+          Effect.gen(function* () {
+            const key = runKey(channelId, messageTs)
+            const controller = activeRuns.get(key)
+            if (!controller) return false
 
-export const cleanupActiveRun = (
-  channelId: string,
-  messageTs: string,
-): void => {
-  activeRuns.delete(runKey(channelId, messageTs));
-};
+            yield* Effect.logInfo(
+              "[active-runs] aborting run for deleted message",
+            ).pipe(Effect.annotateLogs({ channelId, messageTs }))
+
+            controller.abort()
+            activeRuns.delete(key)
+            return true
+          }),
+
+        cleanup: (channelId: string, messageTs: string) =>
+          Effect.sync(() => {
+            activeRuns.delete(runKey(channelId, messageTs))
+          }),
+      }
+    }),
+  },
+) {
+  static layer = Layer.effect(this)(this.make)
+}

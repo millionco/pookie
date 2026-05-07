@@ -1,4 +1,4 @@
-import { loadOAuthAuthorizationLink } from "@/server/mcp/store";
+import { loadOAuthAuthorizationLinkAsync } from "@/server/mcp/store";
 
 import { AuthorizationStartExpiredView, AuthorizationStartView } from "./view";
 
@@ -24,7 +24,7 @@ const AuthorizationStartPage = async ({
     );
   }
 
-  const payload = await loadOAuthAuthorizationLink(token);
+  const payload = await loadOAuthAuthorizationLinkAsync(token);
   if (!payload) {
     return (
       <AuthorizationStartExpiredView message="This authorization link expired. Return to Slack and run `/mcp status` to get a fresh link." />

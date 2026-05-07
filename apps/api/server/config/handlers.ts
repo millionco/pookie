@@ -1,13 +1,9 @@
 import { extractSlackEventContext } from "../slack/schemas";
 import { isSlackAdmin } from "../utils/is-slack-admin";
 import { parseSubcommandArgs } from "../utils/parse-slash-command-args";
+import { appRuntime } from "../runtime";
 import { CONFIG_KEYS } from "./constants";
 import { mergeLayers } from "./resolve";
-import {
-  personalityOptionSchema,
-  pookieConfigSchema,
-  reasoningEffortOptionSchema,
-} from "./schema";
 import {
   clearConfigForScope,
   loadConfigForScope,
@@ -15,7 +11,6 @@ import {
 } from "./store";
 
 import type { SlashCommandEvent } from "chat";
-import type { z } from "zod";
 
 import type { ParsedArgs } from "../utils/parse-slash-command-args";
 import type {
@@ -25,6 +20,9 @@ import type {
   PookieConfigScope,
   PookieConfigScopeKind,
 } from "./schema";
+
+const PERSONALITY_OPTIONS = ["cute", "balanced", "professional"] as const;
+const REASONING_EFFORT_OPTIONS = ["minimal", "medium", "high"] as const;
 
 const resolveScope = (
   teamId: string,
@@ -83,32 +81,40 @@ type ValueCoercer = (
   | { ok: true; value: PookieConfig[PookieConfigKey] }
   | { ok: false; error: string };
 
-const coerceEnum = <TSchema extends z.ZodTypeAny>(
-  schema: TSchema,
-  raw: string,
-  optionListHint: string,
-): { ok: true; value: z.infer<TSchema> } | { ok: false; error: string } => {
-  const parsed = schema.safeParse(raw);
-  if (parsed.success) return { ok: true, value: parsed.data };
-  return {
-    ok: false,
-    error: `invalid value "${raw}". allowed: ${optionListHint}`,
-  };
-};
-
 const VALUE_COERCERS: Record<PookieConfigKey, ValueCoercer> = {
-  personality: (raw) =>
-    coerceEnum(personalityOptionSchema, raw, "cute | balanced | professional"),
-  reasoningEffort: (raw) =>
-    coerceEnum(reasoningEffortOptionSchema, raw, "minimal | medium | high"),
-  reactionEmoji: (raw) => {
-    const trimmed = raw.replace(/^:|:$/g, "");
-    const parsed = pookieConfigSchema.shape.reactionEmoji.safeParse(trimmed);
-    if (parsed.success) return { ok: true, value: parsed.data };
+  personality: (raw) => {
+    if (PERSONALITY_OPTIONS.includes(raw as (typeof PERSONALITY_OPTIONS)[number]))
+      return { ok: true, value: raw };
     return {
       ok: false,
-      error: `invalid emoji "${raw}". use a slack shortcode like sparkling_heart or :white_check_mark:`,
+      error: `invalid value "${raw}". allowed: cute | balanced | professional`,
     };
+  },
+  reasoningEffort: (raw) => {
+    if (
+      REASONING_EFFORT_OPTIONS.includes(
+        raw as (typeof REASONING_EFFORT_OPTIONS)[number],
+      )
+    )
+      return { ok: true, value: raw };
+    return {
+      ok: false,
+      error: `invalid value "${raw}". allowed: minimal | medium | high`,
+    };
+  },
+  reactionEmoji: (raw) => {
+    const trimmed = raw.replace(/^:|:$/g, "");
+    if (
+      trimmed.length === 0 ||
+      trimmed.length > 64 ||
+      !/^[a-z0-9_+-]+$/.test(trimmed)
+    ) {
+      return {
+        ok: false,
+        error: `invalid emoji "${raw}". use a slack shortcode like sparkling_heart or :white_check_mark:`,
+      };
+    }
+    return { ok: true, value: trimmed };
   },
   cards: (raw) => {
     const bool = parseBoolean(raw);
@@ -183,11 +189,15 @@ const handleShow = async (event: SlashCommandEvent): Promise<void> => {
   const { userId, channelId, teamId } = extractSlackEventContext(event.raw);
   const effectiveUserId = userId ?? event.user.userId;
   const [userLayer, channelLayer, globalLayer] = await Promise.all([
-    loadConfigForScope({ kind: "user", userId: effectiveUserId, teamId }),
+    appRuntime.runPromise(
+      loadConfigForScope({ kind: "user", userId: effectiveUserId, teamId }),
+    ),
     channelId
-      ? loadConfigForScope({ kind: "channel", channelId, teamId })
+      ? appRuntime.runPromise(
+          loadConfigForScope({ kind: "channel", channelId, teamId }),
+        )
       : Promise.resolve<PookieConfigPartial>({}),
-    loadConfigForScope({ kind: "global", teamId }),
+    appRuntime.runPromise(loadConfigForScope({ kind: "global", teamId })),
   ]);
 
   const resolved = mergeLayers({
@@ -260,9 +270,9 @@ const handleSet = async (
     return;
   }
 
-  const existing = await loadConfigForScope(scope);
+  const existing = await appRuntime.runPromise(loadConfigForScope(scope));
   const next: PookieConfigPartial = { ...existing, [configKey]: coerced.value };
-  await saveConfigForScope(scope, next);
+  await appRuntime.runPromise(saveConfigForScope(scope, next));
 
   await reply(
     event,
@@ -316,11 +326,15 @@ const handleUnset = async (
   // POOKIE_CONFIG_DEFAULTS as the fallback is wrong when a lower-priority
   // layer has its own override for the same key.
   const [userLayer, channelLayer, globalLayer] = await Promise.all([
-    loadConfigForScope({ kind: "user", userId: event.user.userId, teamId }),
+    appRuntime.runPromise(
+      loadConfigForScope({ kind: "user", userId: event.user.userId, teamId }),
+    ),
     channelId
-      ? loadConfigForScope({ kind: "channel", channelId, teamId })
+      ? appRuntime.runPromise(
+          loadConfigForScope({ kind: "channel", channelId, teamId }),
+        )
       : Promise.resolve<PookieConfigPartial>({}),
-    loadConfigForScope({ kind: "global", teamId }),
+    appRuntime.runPromise(loadConfigForScope({ kind: "global", teamId })),
   ]);
 
   const targetLayer =
@@ -340,7 +354,7 @@ const handleUnset = async (
 
   const nextTargetLayer: PookieConfigPartial = { ...targetLayer };
   delete nextTargetLayer[configKey];
-  await saveConfigForScope(scope, nextTargetLayer);
+  await appRuntime.runPromise(saveConfigForScope(scope, nextTargetLayer));
 
   const resolvedAfterUnset = mergeLayers({
     user: scope.kind === "user" ? nextTargetLayer : userLayer,
@@ -378,7 +392,7 @@ const handleReset = async (
     return;
   }
 
-  const didClear = await clearConfigForScope(scope);
+  const didClear = await appRuntime.runPromise(clearConfigForScope(scope));
   if (didClear) {
     await reply(event, `reset ${scopeLabel(scope)} pookie config.`);
   } else {

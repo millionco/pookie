@@ -1,4 +1,4 @@
-import { tryRegister } from "../../mcp/client";
+import { tryRegisterAsync } from "../../mcp/client";
 import {
   initiateGitHubOAuth,
   isGitHubOAuthConfigured,
@@ -6,9 +6,9 @@ import {
 import { createAuthorizationStartUrl } from "../../mcp/handlers";
 import { getPresetDisplayName, resolvePreset } from "../../mcp/presets";
 import {
-  clearOAuthArtifacts,
+  clearOAuthArtifactsAsync,
   oauthOwnerId,
-  saveServerConfig,
+  saveServerConfigAsync,
 } from "../../mcp/store";
 import { resolveSlackWebClient } from "../web-client";
 import { ONBOARDING_CONNECT_ACTION_ID } from "./cards-builder";
@@ -92,8 +92,8 @@ export const handleOnboardingConnectAction = async (
     createdAt: Date.now(),
   };
 
-  await saveServerConfig(config);
-  await clearOAuthArtifacts(
+  await saveServerConfigAsync(config);
+  await clearOAuthArtifactsAsync(
     userId,
     preset.name,
     teamId,
@@ -138,7 +138,7 @@ export const handleOnboardingConnectAction = async (
   );
 
   try {
-    const result = await tryRegister(userId, config, teamId);
+    const result = await tryRegisterAsync(userId, config, teamId);
 
     if (result.connected) {
       await replyEphemeral(
@@ -160,7 +160,7 @@ export const handleOnboardingConnectAction = async (
       );
     }
   } catch (error) {
-    console.error("[onboarding-connect-action] tryRegister failed", error);
+    console.error("[onboarding-connect-action] tryRegisterAsync failed", error);
     await replyEphemeral(
       teamId,
       channelId,

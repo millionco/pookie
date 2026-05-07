@@ -1,44 +1,48 @@
-import { MCP_PRESETS, getPresetDisplayName } from "../mcp/presets";
-import { redis } from "../mcp/redis";
-import { slackBot } from "../slack-bot";
-import { resolveSlackWebClient } from "./web-client";
+import { Effect } from "effect"
 
-import type { WebClient } from "@slack/web-api";
+import { MCP_PRESETS, getPresetDisplayName } from "../mcp/presets"
+import { Redis } from "../infra/redis"
+import { slackBot } from "../slack-bot"
+import { resolveSlackWebClient } from "./web-client"
 
-const WELCOME_KEY_PREFIX = "pookie:welcome";
+import type { WebClient } from "@slack/web-api"
+
+const WELCOME_KEY_PREFIX = "pookie:welcome"
 
 const welcomeKey = (teamId: string): string =>
-  `${WELCOME_KEY_PREFIX}:${teamId}`;
+  `${WELCOME_KEY_PREFIX}:${teamId}`
 
-const hasSentWelcome = async (teamId: string): Promise<boolean> => {
-  try {
-    const value = await redis.get(welcomeKey(teamId));
-    return Boolean(value);
-  } catch {
-    return false;
-  }
-};
+const hasSentWelcome = (teamId: string) =>
+  Effect.gen(function* () {
+    const redis = yield* Redis
+    const value = yield* redis.get(welcomeKey(teamId))
+    return Boolean(value)
+  }).pipe(Effect.catchCause(() => Effect.succeed(false)))
 
-const markWelcomeSent = async (teamId: string): Promise<void> => {
-  try {
-    await redis.set(welcomeKey(teamId), "1");
-  } catch (error) {
-    console.warn("[welcome] failed to persist welcome flag", error);
-  }
-};
+const markWelcomeSent = (teamId: string) =>
+  Effect.gen(function* () {
+    const redis = yield* Redis
+    yield* redis.set(welcomeKey(teamId), "1")
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("[welcome] failed to persist welcome flag").pipe(
+        Effect.annotateLogs({ error: String(cause) }),
+      ),
+    ),
+  )
 
 const popularPresetNames = Object.values(MCP_PRESETS)
   .filter((preset) => !preset.hiddenByDefault)
   .map((preset) => getPresetDisplayName(preset))
-  .join(", ");
+  .join(", ")
 
 // First-install greeting: pookie introduces herself like a kitten poking its
 // head out. No feature list, no help text wall -- per personality.md the hatch
 // moment is deliberately quiet. Capabilities only surface when the user asks.
 const HATCH_GREETING =
-  "hi. i'm a pookie. i just moved in. try `/help` if you need me.";
+  "hi. i'm a pookie. i just moved in. try `/help` if you need me."
 
-const SHORT_GREETING = "hey. tag me anytime. `/help` for more.";
+const SHORT_GREETING = "hey. tag me anytime. `/help` for more."
 
 export const FULL_HELP_TEXT = [
   "hi. i'm a pookie -- a kitty that lives in your slack.",
@@ -56,40 +60,41 @@ export const FULL_HELP_TEXT = [
   "\u2022 scope settings with `--channel` or `--global` (admin)",
   "",
   "privacy: i only see channels i've been invited to. no training, no cross-workspace data sharing.",
-].join("\n");
+].join("\n")
 
 const post = async (
   client: WebClient,
   channelId: string,
   text: string,
 ): Promise<void> => {
-  await client.chat.postMessage({ channel: channelId, text });
-};
+  await client.chat.postMessage({ channel: channelId, text })
+}
 
-export const welcomeOnBotChannelJoin = async (
+export const welcomeOnBotChannelJoin = (
   teamId: string,
   channelId: string,
-): Promise<void> => {
-  await slackBot.initialize();
+) =>
+  Effect.gen(function* () {
+    yield* Effect.tryPromise(() => slackBot.initialize())
 
-  const client = await resolveSlackWebClient(teamId);
-  if (!client) {
-    console.warn("[welcome] no bot token available for team", teamId);
-    return;
-  }
+    const client = yield* Effect.tryPromise(() => resolveSlackWebClient(teamId))
+    if (!client) {
+      yield* Effect.logWarning("[welcome] no bot token available for team", { teamId })
+      return
+    }
 
-  const alreadyWelcomed = await hasSentWelcome(teamId);
+    const alreadyWelcomed = yield* hasSentWelcome(teamId)
 
-  if (alreadyWelcomed) {
-    await post(client, channelId, SHORT_GREETING);
-    return;
-  }
+    if (alreadyWelcomed) {
+      yield* Effect.tryPromise(() => post(client, channelId, SHORT_GREETING))
+      return
+    }
 
-  // Order matters: post first, mark second. If markWelcomeSent fails silently
-  // (its catch swallows redis errors), the next channel-join sees no welcome
-  // flag and re-posts HATCH_GREETING -- visible repeat. This is a known
-  // low-probability race; resolving it properly needs an atomic SET-NX or a
-  // contract change to markWelcomeSent. Flagged in launch.md.
-  await post(client, channelId, HATCH_GREETING);
-  await markWelcomeSent(teamId);
-};
+    // Order matters: post first, mark second. If markWelcomeSent fails silently
+    // (its catch swallows redis errors), the next channel-join sees no welcome
+    // flag and re-posts HATCH_GREETING -- visible repeat. This is a known
+    // low-probability race; resolving it properly needs an atomic SET-NX or a
+    // contract change to markWelcomeSent. Flagged in launch.md.
+    yield* Effect.tryPromise(() => post(client, channelId, HATCH_GREETING))
+    yield* markWelcomeSent(teamId)
+  })

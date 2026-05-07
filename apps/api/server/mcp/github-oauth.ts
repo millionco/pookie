@@ -7,12 +7,12 @@ import {
   GITHUB_OAUTH_TOKEN_URL,
 } from "./constants";
 import {
-  consumeOAuthState,
-  getServerConfig,
-  loadCodeVerifier,
-  saveCodeVerifier,
-  saveOAuthState,
-  saveServerConfig,
+  consumeOAuthStateAsync,
+  getServerConfigAsync,
+  loadCodeVerifierAsync,
+  saveCodeVerifierAsync,
+  saveOAuthStateAsync,
+  saveServerConfigAsync,
 } from "./store";
 
 import type { McpScope, McpServerConfig } from "./store";
@@ -114,8 +114,8 @@ export const initiateGitHubOAuth = async (
   const codeChallenge = await computeCodeChallenge(codeVerifier);
 
   await Promise.all([
-    saveOAuthState(stateToken, { userId, serverName, channelId, teamId }),
-    saveCodeVerifier(userId, serverName, codeVerifier, teamId),
+    saveOAuthStateAsync(stateToken, { userId, serverName, channelId, teamId }),
+    saveCodeVerifierAsync(userId, serverName, codeVerifier, teamId),
   ]);
 
   const authorizationUrl = buildGitHubAuthorizationUrl(
@@ -141,7 +141,7 @@ const findConfigByName = async (
   }
 
   for (const scope of scopes) {
-    const config = await getServerConfig(scope, serverName);
+    const config = await getServerConfigAsync(scope, serverName);
     if (config) return config;
   }
 
@@ -160,7 +160,7 @@ export const finishGitHubOAuth = async ({
   channelId?: string;
   teamId: string;
 }> => {
-  const payload = await consumeOAuthState(state);
+  const payload = await consumeOAuthStateAsync(state);
   if (!payload) {
     throw new Error("Invalid or expired OAuth state token");
   }
@@ -173,7 +173,7 @@ export const finishGitHubOAuth = async ({
     );
   }
 
-  const codeVerifier = await loadCodeVerifier(userId, serverName, teamId);
+  const codeVerifier = await loadCodeVerifierAsync(userId, serverName, teamId);
   if (!codeVerifier) {
     throw new Error("PKCE code verifier not found or expired");
   }
@@ -186,7 +186,7 @@ export const finishGitHubOAuth = async ({
   }
 
   config.token = accessToken;
-  await saveServerConfig(config);
+  await saveServerConfigAsync(config);
 
   return { userId, serverName, channelId, teamId };
 };

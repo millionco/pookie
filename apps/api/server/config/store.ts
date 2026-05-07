@@ -1,85 +1,89 @@
-import { redis } from "../mcp/redis";
-import { POOKIE_CONFIG_PREFIX } from "./constants";
-import { pookieConfigPartialSchema } from "./schema";
+import { Effect, Schema } from "effect"
 
-import type { PookieConfigPartial, PookieConfigScope } from "./schema";
+import { ConfigError, RedisError } from "../errors"
+import { Redis } from "../infra/redis"
+import { POOKIE_CONFIG_PREFIX } from "./constants"
+import { PookieConfigPartialSchema } from "./schema"
+
+import type { PookieConfigPartial, PookieConfigScope } from "./schema"
 
 const configKey = (scope: PookieConfigScope): string => {
   switch (scope.kind) {
     case "global":
-      return `${POOKIE_CONFIG_PREFIX}:${scope.teamId}:global`;
+      return `${POOKIE_CONFIG_PREFIX}:${scope.teamId}:global`
     case "channel":
-      return `${POOKIE_CONFIG_PREFIX}:${scope.teamId}:channel:${scope.channelId}`;
+      return `${POOKIE_CONFIG_PREFIX}:${scope.teamId}:channel:${scope.channelId}`
     case "user":
-      return `${POOKIE_CONFIG_PREFIX}:${scope.teamId}:user:${scope.userId}`;
+      return `${POOKIE_CONFIG_PREFIX}:${scope.teamId}:user:${scope.userId}`
   }
-};
+}
 
-const parseStoredConfig = (raw: unknown, key: string): PookieConfigPartial => {
-  if (!raw) return {};
-  try {
-    const deserialized =
-      typeof raw === "string" ? (JSON.parse(raw) as unknown) : raw;
-    const parsed = pookieConfigPartialSchema.safeParse(deserialized);
-    if (parsed.success) return parsed.data;
-    // Stored value didn't match the current schema — possibly a schema
-    // migration, a hand-edited redis value, or a corrupted write. Log
-    // enough to diagnose without leaking a huge blob, and fall back to
-    // defaults rather than failing the whole turn.
-    const preview =
-      typeof raw === "string"
-        ? raw.slice(0, 120)
-        : JSON.stringify(raw).slice(0, 120);
-    console.warn("[pookie-config] stored config failed schema validation", {
-      key,
-      preview,
-      issues: parsed.error.issues.slice(0, 3),
-    });
-    return {};
-  } catch (parseError) {
-    console.warn("[pookie-config] failed to parse stored config", {
-      key,
-      error: parseError,
-    });
-    return {};
-  }
-};
+const decodePartialConfig = Schema.decodeUnknownEffect(PookieConfigPartialSchema)
 
-export const loadConfigForScope = async (
-  scope: PookieConfigScope,
-): Promise<PookieConfigPartial> => {
-  const key = configKey(scope);
-  try {
-    const raw = await redis.get(key);
-    return parseStoredConfig(raw, key);
-  } catch (redisError) {
-    // Degrade gracefully on transient Redis failures (network blip,
-    // rate limit) so a single config-load error doesn't reject the
-    // Promise.all in buildSystemMessages and crash the entire agent
-    // response path.
-    console.warn("[pookie-config] failed to load config for scope", {
-      key,
-      error: redisError,
-    });
-    return {};
-  }
-};
+const parseStoredConfig = (
+  raw: string | null,
+  key: string,
+): Effect.Effect<PookieConfigPartial, ConfigError> =>
+  Effect.gen(function* () {
+    if (!raw) return {}
 
-export const saveConfigForScope = async (
-  scope: PookieConfigScope,
-  partial: PookieConfigPartial,
-): Promise<void> => {
-  const key = configKey(scope);
-  if (Object.keys(partial).length === 0) {
-    await redis.del(key);
-    return;
-  }
-  await redis.set(key, JSON.stringify(partial));
-};
+    const deserialized = yield* Effect.try({
+      try: () => JSON.parse(raw) as unknown,
+      catch: (parseError) => {
+        console.warn("[pookie-config] failed to parse stored config", {
+          key,
+          error: parseError,
+        })
+        return new ConfigError({ key })
+      },
+    }).pipe(Effect.catchTag("ConfigError", () => Effect.succeed(null)))
 
-export const clearConfigForScope = async (
-  scope: PookieConfigScope,
-): Promise<boolean> => {
-  const deleted = await redis.del(configKey(scope));
-  return deleted > 0;
-};
+    if (deserialized === null) return {}
+
+    const decoded = yield* decodePartialConfig(deserialized).pipe(
+      Effect.catchTag("SchemaError", (decodeError) => {
+        // Stored value didn't match the current schema — possibly a schema
+        // migration, a hand-edited redis value, or a corrupted write. Log
+        // enough to diagnose without leaking a huge blob, and fall back to
+        // defaults rather than failing the whole turn.
+        const preview = raw.slice(0, 120)
+        console.warn("[pookie-config] stored config failed schema validation", {
+          key,
+          preview,
+          issues: decodeError.message.slice(0, 200),
+        })
+        return Effect.succeed({} as PookieConfigPartial)
+      }),
+    )
+
+    return decoded
+  })
+
+export const loadConfigForScope = Effect.fn("Config.loadConfigForScope")(
+  function* (scope: PookieConfigScope) {
+    const redis = yield* Redis
+    const key = configKey(scope)
+    const raw = yield* redis.get(key)
+    return yield* parseStoredConfig(raw, key)
+  },
+)
+
+export const saveConfigForScope = Effect.fn("Config.saveConfigForScope")(
+  function* (scope: PookieConfigScope, partial: PookieConfigPartial) {
+    const redis = yield* Redis
+    const key = configKey(scope)
+    if (Object.keys(partial).length === 0) {
+      yield* redis.del(key)
+      return
+    }
+    yield* redis.set(key, JSON.stringify(partial))
+  },
+)
+
+export const clearConfigForScope = Effect.fn("Config.clearConfigForScope")(
+  function* (scope: PookieConfigScope) {
+    const redis = yield* Redis
+    const deleted = yield* redis.del(configKey(scope))
+    return deleted > 0
+  },
+)

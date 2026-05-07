@@ -1,15 +1,15 @@
 import { env } from "@/env";
 
 import {
-  clearOAuthArtifacts,
-  loadCodeVerifier,
-  loadOAuthClient,
-  loadOAuthTokens,
-  saveCodeVerifier,
-  saveOAuthClient,
-  saveOAuthState,
-  saveOAuthTokens,
-  savePendingAuthUrl,
+  clearOAuthArtifactsAsync,
+  loadCodeVerifierAsync,
+  loadOAuthClientAsync,
+  loadOAuthTokensAsync,
+  saveCodeVerifierAsync,
+  saveOAuthClientAsync,
+  saveOAuthStateAsync,
+  saveOAuthTokensAsync,
+  savePendingAuthUrlAsync,
 } from "./store";
 
 import type {
@@ -61,31 +61,31 @@ export const createMcpAuthProvider = ({
 
     async tokens() {
       if (cachedTokens) return cachedTokens;
-      cachedTokens = await loadOAuthTokens(tokenOwnerId, serverName, teamId);
+      cachedTokens = await loadOAuthTokensAsync(tokenOwnerId, serverName, teamId);
       return cachedTokens;
     },
 
     async saveTokens(tokens: OAuthTokens) {
       cachedTokens = tokens;
-      await saveOAuthTokens(tokenOwnerId, serverName, tokens, teamId);
+      await saveOAuthTokensAsync(tokenOwnerId, serverName, tokens, teamId);
     },
 
     async clientInformation() {
-      return loadOAuthClient(tokenOwnerId, serverName, teamId);
+      return loadOAuthClientAsync(tokenOwnerId, serverName, teamId);
     },
 
     async saveClientInformation(clientInfo: OAuthClientInformation) {
-      await saveOAuthClient(tokenOwnerId, serverName, clientInfo, teamId);
+      await saveOAuthClientAsync(tokenOwnerId, serverName, clientInfo, teamId);
     },
 
     async codeVerifier() {
-      const verifier = await loadCodeVerifier(userId, serverName, teamId);
+      const verifier = await loadCodeVerifierAsync(userId, serverName, teamId);
       if (!verifier) throw new Error("No PKCE code verifier found");
       return verifier;
     },
 
     async saveCodeVerifier(verifier: string) {
-      await saveCodeVerifier(userId, serverName, verifier, teamId);
+      await saveCodeVerifierAsync(userId, serverName, verifier, teamId);
     },
 
     async redirectToAuthorization(authorizationUrl: URL) {
@@ -94,8 +94,8 @@ export const createMcpAuthProvider = ({
 
       const finalUrl = authorizationUrl.toString();
       await Promise.all([
-        saveOAuthState(stateToken, { userId, serverName, channelId, teamId }),
-        savePendingAuthUrl(userId, serverName, finalUrl, teamId),
+        saveOAuthStateAsync(stateToken, { userId, serverName, channelId, teamId }),
+        savePendingAuthUrlAsync(userId, serverName, finalUrl, teamId),
       ]);
 
       throw new McpOAuthRedirectError(finalUrl, serverUrl);
@@ -104,7 +104,7 @@ export const createMcpAuthProvider = ({
     async invalidateCredentials(scope) {
       cachedTokens = undefined;
       if (scope === "all") {
-        await clearOAuthArtifacts(userId, serverName, teamId, tokenOwnerId);
+        await clearOAuthArtifactsAsync(userId, serverName, teamId, tokenOwnerId);
       }
     },
   };

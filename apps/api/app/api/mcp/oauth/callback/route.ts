@@ -1,6 +1,6 @@
 import { after } from "next/server";
 
-import { finishOAuth } from "@/server/mcp/client";
+import { finishOAuthAsync } from "@/server/mcp/client";
 import { notifyMcpAuthSuccess } from "@/server/mcp/notify-auth-success";
 import { applyOnboardingConnection } from "@/server/slack/onboarding/orchestrator";
 
@@ -17,7 +17,7 @@ export const GET = async (request: Request): Promise<Response> => {
   }
 
   try {
-    const { userId, serverName, channelId, teamId } = await finishOAuth({
+    const { userId, serverName, channelId, teamId } = await finishOAuthAsync({
       code,
       state,
     });

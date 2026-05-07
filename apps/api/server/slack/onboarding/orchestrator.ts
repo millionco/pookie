@@ -2,16 +2,17 @@ import {
   MCP_PRESETS,
   getPresetDisplayName,
   resolvePreset,
-} from "../../mcp/presets";
-import { listVisibleServers, loadOAuthTokens } from "../../mcp/store";
-import { slackBot } from "../../slack-bot";
-import { resolveSlackWebClient } from "../web-client";
-import { buildOnboardingCards } from "./cards-builder";
+} from "../../mcp/presets"
+import { listVisibleServersAsync, loadOAuthTokensAsync } from "../../mcp/store"
+import { slackBot } from "../../slack-bot"
+import { resolveSlackWebClient } from "../web-client"
+import { buildOnboardingCards } from "./cards-builder"
 import {
   isWithinOnboardingWindow,
   loadOnboardingState,
   saveOnboardingState,
-} from "./state";
+} from "./state"
+import { appRuntime } from "../../runtime"
 
 // Derives the set of preset names the user has already connected by checking
 // every MCP config visible to them (global + user-scoped + channel-scoped,
@@ -23,74 +24,76 @@ const resolveConnectedPresetNames = async (
   channelId: string,
   teamId: string,
 ): Promise<string[]> => {
-  const visibleServers = await listVisibleServers(userId, channelId, teamId);
-  const names = new Set<string>();
+  const visibleServers = await listVisibleServersAsync(userId, channelId, teamId)
+  const names = new Set<string>()
   for (const server of visibleServers) {
-    const preset = resolvePreset(server.name);
-    if (!preset) continue;
+    const preset = resolvePreset(server.name)
+    if (!preset) continue
 
-    const hasDirectToken = Boolean(server.token);
-    const oauthTokens = await loadOAuthTokens(userId, server.name, teamId);
+    const hasDirectToken = Boolean(server.token)
+    const oauthTokens = await loadOAuthTokensAsync(userId, server.name, teamId)
     if (hasDirectToken || oauthTokens) {
-      names.add(preset.name);
+      names.add(preset.name)
     }
   }
-  return [...names];
-};
+  return [...names]
+}
 
 const onboardingPresets = () =>
   Object.values(MCP_PRESETS).filter(
     (preset) => !preset.hiddenByDefault && preset.authType !== "token",
-  );
+  )
 
 export const startOnboarding = async (
   teamId: string,
   userId: string,
   channelId: string,
 ): Promise<void> => {
-  await slackBot.initialize();
+  await slackBot.initialize()
 
-  const client = await resolveSlackWebClient(teamId);
+  const client = await resolveSlackWebClient(teamId)
   if (!client) {
-    console.warn("[onboarding] no bot token available for team", teamId);
-    return;
+    console.warn("[onboarding] no bot token available for team", teamId)
+    return
   }
 
   const connectedPresets = await resolveConnectedPresetNames(
     userId,
     channelId,
     teamId,
-  );
+  )
 
   const cards = buildOnboardingCards({
     presets: onboardingPresets(),
     connectedPresets,
-  });
+  })
 
   await client.chat.postEphemeral({
     channel: channelId,
     user: userId,
     text: cards.text,
     blocks: cards.blocks,
-  });
+  })
 
-  await saveOnboardingState(userId, {
-    startedAt: Date.now(),
-    teamId,
-    channelId,
-    connectedPresets,
-  });
-};
+  await appRuntime.runPromise(
+    saveOnboardingState(userId, {
+      startedAt: Date.now(),
+      teamId,
+      channelId,
+      connectedPresets,
+    }),
+  )
+}
 
 export const autoStartOnboardingIfFirstInvite = async (
   teamId: string,
   userId: string,
   channelId: string,
 ): Promise<void> => {
-  const existing = await loadOnboardingState(userId);
-  if (existing) return;
-  await startOnboarding(teamId, userId, channelId);
-};
+  const existing = await appRuntime.runPromise(loadOnboardingState(userId))
+  if (existing) return
+  await startOnboarding(teamId, userId, channelId)
+}
 
 // Fired from the MCP OAuth callback. Inside the onboarding window, we post
 // a fresh ephemeral confirmation in the user's onboarding channel so they
@@ -103,38 +106,40 @@ export const applyOnboardingConnection = async (
   userId: string,
   serverName: string,
 ): Promise<void> => {
-  const state = await loadOnboardingState(userId);
-  if (!state) return;
-  if (!isWithinOnboardingWindow(state, Date.now())) return;
+  const state = await appRuntime.runPromise(loadOnboardingState(userId))
+  if (!state) return
+  if (!isWithinOnboardingWindow(state, Date.now())) return
 
-  const preset = resolvePreset(serverName);
-  if (!preset) return;
+  const preset = resolvePreset(serverName)
+  if (!preset) return
 
   const connectedPresets = state.connectedPresets.includes(preset.name)
     ? state.connectedPresets
-    : [...state.connectedPresets, preset.name];
+    : [...state.connectedPresets, preset.name]
 
-  await saveOnboardingState(userId, { ...state, connectedPresets });
+  await appRuntime.runPromise(
+    saveOnboardingState(userId, { ...state, connectedPresets }),
+  )
 
-  const client = await resolveSlackWebClient(state.teamId);
+  const client = await resolveSlackWebClient(state.teamId)
   if (!client) {
-    console.warn("[onboarding] no bot token available for team", state.teamId);
-    return;
+    console.warn("[onboarding] no bot token available for team", state.teamId)
+    return
   }
 
-  const displayName = getPresetDisplayName(preset);
+  const displayName = getPresetDisplayName(preset)
   // Surfaces the freshly-connected preset's example queries inline so users
   // see concrete things they can ask the second OAuth completes, not a bare
   // "connected" confirmation.
   const exampleQueryLines = preset.exampleQueries.map(
     (exampleQuery) => `• _${exampleQuery}_`,
-  );
+  )
   const followUpLines = [
     `:white_check_mark: *${displayName}* connected.`,
     ...(exampleQueryLines.length > 0 ? ["", "try:", ...exampleQueryLines] : []),
     "",
     "run `/onboarding` to add more.",
-  ];
+  ]
   await client.chat.postEphemeral({
     channel: state.channelId,
     user: userId,
@@ -148,5 +153,5 @@ export const applyOnboardingConnection = async (
         },
       },
     ],
-  });
-};
+  })
+}

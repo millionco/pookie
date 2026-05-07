@@ -1,29 +1,22 @@
+import { Effect } from "effect";
 import * as AI from "ai";
 import * as ChatSDK from "chat";
 import { z } from "zod";
 
-import { openMcpTools } from "../mcp/client";
+import { openMcpToolsAsync } from "../mcp/client";
 import { buildReauthCard, createAuthorizationStartUrl } from "../mcp/handlers";
-import { redis } from "../mcp/redis";
-import { createProvider } from "../openai-provider";
+import { OpenAIProvider } from "../infra/openai-provider";
+import { SecureStore } from "../infra/secure-store";
 import { slackBot } from "../slack-bot";
 import { extractSlackEventContext } from "../slack/schemas";
 import { buildToolset, cacheSlackSearchContext } from "../tools";
 import { ensureAttachmentText } from "../utils/ensure-attachment-text";
 import {
-  getCurrentTraceId,
-  printTraceInfo,
-  stampSpanAttribute,
-} from "../utils/get-current-trace-id";
-import { logger, runWithLogging } from "../utils/logger";
-import { postTraceFooter } from "../utils/post-trace-footer";
-import {
   sanitizeAssistantTextInMessages,
   sanitizeForMarkdown,
 } from "../utils/sanitize-slack-mrkdwn";
 import { sanitizeStoredMessages } from "../utils/sanitize-stored-messages";
-import { decryptJson, encryptJson } from "../utils/secure-store";
-import { cleanupActiveRun, registerActiveRun } from "./active-runs";
+import { ActiveRuns } from "./active-runs";
 import {
   MAX_BUILTIN_TOOL_CALLS_PER_RESPONSE,
   MAX_FOLLOW_UP_ROUNDS,
@@ -38,13 +31,10 @@ import {
   buildSystemReminder,
   injectSystemReminderIntoLastUserMessage,
 } from "./system-reminder";
-import {
-  drainFollowUps,
-  enqueueFollowUp,
-  releaseThreadLock,
-  tryAcquireThreadLock,
-  tryMarkReauthNoticeSent,
-} from "./thread-lock";
+import { ThreadLock } from "./thread-lock";
+import { AgentStreamError } from "../errors";
+import { postTraceFooter } from "../utils/post-trace-footer";
+import { getCurrentTraceId, printTraceInfo } from "../utils/get-current-trace-id";
 
 import type { OpenAILanguageModelResponsesOptions } from "@ai-sdk/openai";
 import type { SlackAdapter } from "@chat-adapter/slack";
@@ -116,20 +106,10 @@ const handleSegment = async (
   // drop is visible in Axiom traces — the only reliable way to investigate
   // these from outside the deployment. Without span attributes the parent
   // streamText span looks healthy and the drop is invisible to APL queries.
-  const droppedCardErrorMessage =
-    segment.error instanceof Error
-      ? segment.error.message
-      : String(segment.error);
-  logger.warn(
+  console.warn(
     "[agent] dropping malformed <card> block:",
     segment.error,
     segment.raw.slice(0, 200),
-  );
-  stampSpanAttribute("pookiebot.dropped_card", true);
-  stampSpanAttribute("pookiebot.dropped_card_error", droppedCardErrorMessage);
-  stampSpanAttribute(
-    "pookiebot.dropped_card_raw_preview",
-    segment.raw.slice(0, 500),
   );
   return didFlush;
 };
@@ -141,11 +121,6 @@ const threadStateSchema = z.object({
 const imageGenerationOutputSchema = z.object({
   result: z.string().min(1),
 });
-
-interface AgentRoundResult {
-  conversationMessages: Array<ModelMessage>;
-  didPostMessage: boolean;
-}
 
 const postImageGenerationOutput = async (
   thread: ChatSDK.Thread,
@@ -168,229 +143,321 @@ const postImageGenerationOutput = async (
     })
     .then(() => true)
     .catch((postError: unknown) => {
-      logger.warn("[agent] image upload failed:", postError);
+      console.warn("[agent] image upload failed:", postError);
       return false;
     });
 };
 
-const runAgentRound = async (options: {
-  thread: ChatSDK.Thread;
-  slack: SlackAdapter;
-  state: ChatSDK.StateAdapter;
-  currentMessage: ChatSDK.Message | undefined;
-  conversationMessages: Array<ModelMessage>;
-  systemMessages: Array<ModelMessage>;
-  resolvedConfig: {
-    config: { reasoningEffort: string; tracesFooter: boolean };
-  };
-  tools: Record<string, AI.Tool>;
-  abortController: AbortController | undefined;
-  followUpMessages: string[] | undefined;
-  mcpServers: McpServerSummary[] | undefined;
-  isTracingEnabled: boolean;
-}): Promise<AgentRoundResult> => {
-  const {
-    thread,
-    slack,
-    currentMessage,
-    resolvedConfig,
-    tools,
-    abortController,
-    followUpMessages,
-    mcpServers,
-    isTracingEnabled,
-    conversationMessages,
-    systemMessages,
-  } = options;
+const runAgentRound = Effect.fn("Agent.runAgentRound")(
+  (options: {
+    thread: ChatSDK.Thread;
+    slack: SlackAdapter;
+    state: ChatSDK.StateAdapter;
+    currentMessage: ChatSDK.Message | undefined;
+    conversationMessages: Array<ModelMessage>;
+    systemMessages: Array<ModelMessage>;
+    resolvedConfig: {
+      config: { reasoningEffort: string; tracesFooter: boolean };
+    };
+    tools: Record<string, AI.Tool>;
+    abortController: AbortController | undefined;
+    followUpMessages: string[] | undefined;
+    mcpServers: McpServerSummary[] | undefined;
+    isTracingEnabled: boolean;
+  }) =>
+    Effect.gen(function* () {
+      const openaiProvider = yield* OpenAIProvider;
+      const secureStore = yield* SecureStore;
 
-  // The reminder is injected into the LAST user message AND persisted in
-  // that injected form. This is intentional for prompt-cache stability:
-  // the reminder content frozen at the message's creation turn stays put
-  // forever after, so subsequent turns load the exact same bytes the
-  // model saw in earlier turns and the cache prefix matches everything
-  // before the new last-user-message.
-  //
-  // What this does NOT cause is stacking: injectSystemReminderIntoLastUserMessage
-  // is idempotent — it strips any leading <system-reminder> blocks from
-  // the last user message before prepending the current one. So across
-  // follow-up rounds within a turn, the last user message always carries
-  // exactly one (the current round's) reminder. Older user messages keep
-  // whichever reminder they were assigned in their original turn; that's
-  // stale but stable, which is what cache wants.
-  const openai = createProvider();
-
-  const reminderBody = buildSystemReminder({ followUpMessages, mcpServers });
-  const messagesForModel = reminderBody
-    ? injectSystemReminderIntoLastUserMessage(
+      const {
+        thread,
+        slack,
+        currentMessage,
+        resolvedConfig,
+        tools,
+        abortController,
+        followUpMessages,
+        mcpServers,
+        isTracingEnabled,
         conversationMessages,
-        reminderBody,
-      )
-    : conversationMessages;
+        systemMessages,
+      } = options;
 
-  // Some provider failure modes fire onError mid-stream but let the
-  // stream end cleanly, so the for-await loop completes "successfully"
-  // and the user gets silence. Capture the error here and re-throw after
-  // the loop so the catch posts GENERIC_ERROR_MARKDOWN instead.
-  let capturedStreamError: unknown = null;
+      // The reminder is injected into the LAST user message AND persisted in
+      // that injected form. This is intentional for prompt-cache stability:
+      // the reminder content frozen at the message's creation turn stays put
+      // forever after, so subsequent turns load the exact same bytes the
+      // model saw in earlier turns and the cache prefix matches everything
+      // before the new last-user-message.
+      //
+      // What this does NOT cause is stacking: injectSystemReminderIntoLastUserMessage
+      // is idempotent — it strips any leading <system-reminder> blocks from
+      // the last user message before prepending the current one. So across
+      // follow-up rounds within a turn, the last user message always carries
+      // exactly one (the current round's) reminder. Older user messages keep
+      // whichever reminder they were assigned in their original turn; that's
+      // stale but stable, which is what cache wants.
+      const provider = yield* openaiProvider.create();
 
-  const result = AI.streamText({
-    model: openai("gpt-5.5"),
-    messages: [...systemMessages, ...messagesForModel],
-    allowSystemInMessages: true,
-    tools,
-    abortSignal: abortController?.signal,
-    experimental_telemetry: { isEnabled: isTracingEnabled },
-    stopWhen: AI.stepCountIs(100),
-    onStepFinish: async ({ toolResults }) => {
-      logger.log(
-        "step finish",
-        toolResults.map((stepResult) => stepResult.toolName).join(", "),
-      );
-    },
-    onError: async (streamError) => {
-      logger.error("[agent] streamText error:", streamError);
-      capturedStreamError = streamError;
-    },
-    providerOptions: {
-      openai: {
-        parallelToolCalls: true,
-        reasoningEffort: resolvedConfig.config.reasoningEffort,
-        serviceTier: "priority",
-        truncation: "auto",
-        maxToolCalls: MAX_BUILTIN_TOOL_CALLS_PER_RESPONSE,
-        // // Required, NOT a privacy setting — do not flip to false. The toolset
-        // // marks MCP tools `deferLoading: true` whenever ≥8 are wired up
-        // // (see buildToolset), so they aren't shipped in every request and
-        // // the model loads what it needs via tool_search. With store: true
-        // // OpenAI persists each response's tool namespace; the next request
-        // // resolves the prior round's function_calls against it. With
-        // // store: false that namespace is dropped between requests and the
-        // // very next turn after any MCP tool call fails server-side with
-        // // "Missing namespace for function_call '<tool>'". The agent surfaces
-        // // that as GENERIC_ERROR_MARKDOWN and the user sees "sorry, something
-        // // broke". If you need OpenAI-side data retention guarantees, set
-        // // them at the org level (Zero Data Retention agreement), not here.
-        // store: true,
-      } satisfies OpenAILanguageModelResponsesOptions,
-    },
-  });
-
-  const parser = createCardStreamParser();
-  const textBuffer = { value: "" };
-  let postFailed = false;
-  let didPostMessage = false;
-
-  try {
-    for await (const part of result.fullStream) {
-      if (part.type === "text-delta") {
-        const segments = parser.ingest(part.text);
-        for (const segment of segments) {
-          if (
-            await handleSegment(segment, textBuffer, {
-              thread,
-              slack,
-              currentMessage,
-            })
+      const reminderBody = buildSystemReminder({
+        followUpMessages,
+        mcpServers,
+      });
+      const messagesForModel = reminderBody
+        ? injectSystemReminderIntoLastUserMessage(
+            conversationMessages,
+            reminderBody,
           )
-            didPostMessage = true;
-        }
-        continue;
+        : conversationMessages;
+
+      // Some provider failure modes fire onError mid-stream but let the
+      // stream end cleanly, so the for-await loop completes "successfully"
+      // and the user gets silence. Capture the error here and re-throw after
+      // the loop so the catch posts GENERIC_ERROR_MARKDOWN instead.
+      let capturedStreamError: unknown = null;
+
+      // streamText is synchronous — returns a handle whose .fullStream is
+      // an AsyncIterable consumed in the tryPromise below.
+      const result = AI.streamText({
+        model: provider("gpt-5.5"),
+        messages: [...systemMessages, ...messagesForModel],
+        allowSystemInMessages: true,
+        tools,
+        abortSignal: abortController?.signal,
+        experimental_telemetry: { isEnabled: isTracingEnabled },
+        stopWhen: AI.stepCountIs(100),
+        onStepFinish: async ({ toolResults }) => {
+          console.log(
+            "step finish",
+            toolResults
+              .map((stepResult) => stepResult.toolName)
+              .join(", "),
+          );
+        },
+        onError: async (streamError) => {
+          console.error("[agent] streamText error:", streamError);
+          capturedStreamError = streamError;
+        },
+        providerOptions: {
+          openai: {
+            parallelToolCalls: true,
+            reasoningEffort: resolvedConfig.config.reasoningEffort,
+            serviceTier: "priority",
+            truncation: "auto",
+            maxToolCalls: MAX_BUILTIN_TOOL_CALLS_PER_RESPONSE,
+            // // Required, NOT a privacy setting — do not flip to false. The toolset
+            // // marks MCP tools `deferLoading: true` whenever ≥8 are wired up
+            // // (see buildToolset), so they aren't shipped in every request and
+            // // the model loads what it needs via tool_search. With store: true
+            // // OpenAI persists each response's tool namespace; the next request
+            // // resolves the prior round's function_calls against it. With
+            // // store: false that namespace is dropped between requests and the
+            // // very next turn after any MCP tool call fails server-side with
+            // // "Missing namespace for function_call '<tool>'". The agent surfaces
+            // // that as GENERIC_ERROR_MARKDOWN and the user sees "sorry, something
+            // // broke". If you need OpenAI-side data retention guarantees, set
+            // // them at the org level (Zero Data Retention agreement), not here.
+            // store: true,
+          } satisfies OpenAILanguageModelResponsesOptions,
+        },
+      });
+
+      const streamOutcome = yield* Effect.tryPromise({
+        try: async () => {
+          const parser = createCardStreamParser();
+          const textBuffer = { value: "" };
+          let postFailed = false;
+          let didPostMessage = false;
+
+          try {
+            for await (const part of result.fullStream) {
+              if (part.type === "text-delta") {
+                const segments = parser.ingest(part.text);
+                for (const segment of segments) {
+                  if (
+                    await handleSegment(segment, textBuffer, {
+                      thread,
+                      slack,
+                      currentMessage,
+                    })
+                  )
+                    didPostMessage = true;
+                }
+                continue;
+              }
+
+              if (
+                part.type === "tool-result" &&
+                part.toolName === "image_generation" &&
+                !part.preliminary
+              ) {
+                if (
+                  await postImageGenerationOutput(
+                    thread,
+                    part.toolCallId,
+                    part.output,
+                  )
+                ) {
+                  didPostMessage = true;
+                }
+              }
+            }
+            const tail = parser.flushTail();
+            for (const segment of tail) {
+              if (
+                await handleSegment(segment, textBuffer, {
+                  thread,
+                  slack,
+                  currentMessage,
+                })
+              )
+                didPostMessage = true;
+            }
+            if (await flushTextBuffer(textBuffer, thread))
+              didPostMessage = true;
+            // Stream ended without throwing, but onError may have fired earlier
+            // (e.g., provider error mid-response). Promote it so the catch below
+            // posts the error message rather than leaving the user in silence.
+            if (capturedStreamError) throw capturedStreamError;
+          } catch (streamConsumeError) {
+            if (abortController?.signal.aborted) {
+              console.log("[agent] run cancelled (message deleted)");
+              return { aborted: true, didPostMessage, postFailed: false };
+            }
+            console.error(
+              "[agent] failed while streaming response:",
+              streamConsumeError,
+            );
+            postFailed = true;
+            // Best-effort flush of whatever text we already had buffered before
+            // the error. Without this, when the stream errors mid-text-segment
+            // the user sees nothing — neither the partial answer nor an error.
+            await flushTextBuffer(textBuffer, thread).catch(
+              (flushError: unknown) =>
+                console.warn(
+                  "[agent] failed to flush buffered text after stream error:",
+                  flushError,
+                ),
+            );
+          }
+
+          return { aborted: false, didPostMessage, postFailed };
+        },
+        catch: (cause) => new AgentStreamError({ cause }),
+      });
+
+      if (streamOutcome.aborted) {
+        return {
+          conversationMessages,
+          didPostMessage: streamOutcome.didPostMessage,
+        };
       }
 
-      if (
-        part.type === "tool-result" &&
-        part.toolName === "image_generation" &&
-        !part.preliminary
-      ) {
-        if (
-          await postImageGenerationOutput(thread, part.toolCallId, part.output)
-        ) {
-          didPostMessage = true;
-        }
-      }
-    }
-    const tail = parser.flushTail();
-    for (const segment of tail) {
-      if (
-        await handleSegment(segment, textBuffer, {
-          thread,
-          slack,
-          currentMessage,
-        })
-      )
+      let { didPostMessage } = streamOutcome;
+
+      if (streamOutcome.postFailed) {
         didPostMessage = true;
-    }
-    if (await flushTextBuffer(textBuffer, thread)) didPostMessage = true;
-    // Stream ended without throwing, but onError may have fired earlier
-    // (e.g., provider error mid-response). Promote it so the catch below
-    // posts the error message rather than leaving the user in silence.
-    if (capturedStreamError) throw capturedStreamError;
-  } catch (streamConsumeError) {
-    if (abortController?.signal.aborted) {
-      logger.info("[agent] run cancelled (message deleted)");
-      return { conversationMessages, didPostMessage };
-    }
-    logger.error(
-      "[agent] failed while streaming response:",
-      streamConsumeError,
-    );
-    postFailed = true;
-    // Best-effort flush of whatever text we already had buffered before
-    // the error. Without this, when the stream errors mid-text-segment
-    // the user sees nothing — neither the partial answer nor an error.
-    await flushTextBuffer(textBuffer, thread).catch((flushError: unknown) =>
-      logger.warn(
-        "[agent] failed to flush buffered text after stream error:",
-        flushError,
-      ),
-    );
-  }
+        yield* Effect.tryPromise({
+          try: () => thread.post({ markdown: GENERIC_ERROR_MARKDOWN }),
+          catch: (cause) => new AgentStreamError({ cause }),
+        }).pipe(
+          Effect.catchCause((postError) =>
+            Effect.logWarning("[agent] failed to post error message").pipe(
+              Effect.annotateLogs({ error: String(postError) }),
+            ),
+          ),
+        );
+      }
 
-  if (postFailed) {
-    didPostMessage = true;
-    await thread
-      .post({ markdown: GENERIC_ERROR_MARKDOWN })
-      .catch((postError: unknown) =>
-        logger.warn("[agent] failed to post error message:", postError),
+      const responseMessages = yield* Effect.tryPromise({
+        try: async () => {
+          const { messages: responseMessages } = await result.response;
+          return responseMessages;
+        },
+        catch: (cause) => new AgentStreamError({ cause }),
+      }).pipe(
+        Effect.catchCause((responseError) =>
+          Effect.gen(function* () {
+            yield* Effect.logWarning(
+              "[agent] failed to get response messages",
+            ).pipe(Effect.annotateLogs({ error: String(responseError) }));
+            return null;
+          }),
+        ),
       );
-  }
 
-  try {
-    const { messages: responseMessages } = await result.response;
-    // Strip 3-pipe malformed slack mrkdwn links from assistant text BEFORE
-    // persisting. Otherwise the model's own past bad output sits in
-    // conversation history and primes it to keep producing the same shape.
-    const cleanedResponseMessages =
-      sanitizeAssistantTextInMessages(responseMessages);
-    // Persist messagesForModel (the reminder-injected view) — see the long
-    // comment above where messagesForModel is built. The injected version
-    // is what the model just saw in this round, and freezing it into
-    // history keeps the prompt-cache prefix stable for later turns.
-    const updatedMessages = [...messagesForModel, ...cleanedResponseMessages];
-    await thread.setState({ messages: encryptJson(updatedMessages) });
-    return { conversationMessages: updatedMessages, didPostMessage };
-  } catch (stateError) {
-    logger.warn("[agent] failed to persist thread state:", stateError);
-    return { conversationMessages: messagesForModel, didPostMessage };
-  }
-};
+      if (!responseMessages) {
+        return { conversationMessages: messagesForModel, didPostMessage };
+      }
 
-export const handleSlackMessage = async (
+      // Strip 3-pipe malformed slack mrkdwn links from assistant text BEFORE
+      // persisting. Otherwise the model's own past bad output sits in
+      // conversation history and primes it to keep producing the same shape.
+      const cleanedResponseMessages =
+        sanitizeAssistantTextInMessages(responseMessages);
+      // Persist messagesForModel (the reminder-injected view) — see the long
+      // comment above where messagesForModel is built. The injected version
+      // is what the model just saw in this round, and freezing it into
+      // history keeps the prompt-cache prefix stable for later turns.
+      const updatedMessages = [
+        ...messagesForModel,
+        ...cleanedResponseMessages,
+      ];
+
+      const encryptedState = yield* secureStore
+        .encryptJson(updatedMessages)
+        .pipe(
+          Effect.catchCause((encryptError) =>
+            Effect.gen(function* () {
+              yield* Effect.logWarning(
+                "[agent] failed to encrypt thread state",
+              ).pipe(Effect.annotateLogs({ error: String(encryptError) }));
+              return null;
+            }),
+          ),
+        );
+
+      if (encryptedState !== null) {
+        yield* Effect.tryPromise({
+          try: () => thread.setState({ messages: encryptedState }),
+          catch: (cause) => new AgentStreamError({ cause }),
+        }).pipe(
+          Effect.catchCause((stateError) =>
+            Effect.logWarning("[agent] failed to persist thread state").pipe(
+              Effect.annotateLogs({ error: String(stateError) }),
+            ),
+          ),
+        );
+      }
+
+      return { conversationMessages: updatedMessages, didPostMessage };
+    }),
+);
+
+export const handleSlackMessage = (
   thread: ChatSDK.Thread,
   currentMessage?: ChatSDK.Message,
   skippedMessages?: ChatSDK.Message[],
-): Promise<void> => {
-  const { userId, channelId, teamId } = extractSlackEventContext(
-    currentMessage?.raw,
-  );
-  const isTracingEnabled = TRACING_ALLOWED_WORKSPACE_IDS.includes(teamId);
+) =>
+  Effect.gen(function* () {
+    const threadLock = yield* ThreadLock;
+    const activeRuns = yield* ActiveRuns;
+    const secureStore = yield* SecureStore;
 
-  return runWithLogging(isTracingEnabled, async () => {
-    logger.info("handleSlackMessage", currentMessage?.text);
+    const { userId, channelId, teamId } = extractSlackEventContext(
+      currentMessage?.raw,
+    );
+    const isTracingEnabled = TRACING_ALLOWED_WORKSPACE_IDS.includes(teamId);
+
+    yield* Effect.logInfo("handleSlackMessage").pipe(
+      Effect.annotateLogs({
+        messageText: currentMessage?.text ?? "(none)",
+      }),
+    );
 
     const slack: SlackAdapter = slackBot.getAdapter("slack");
 
-    const lockAcquired = await tryAcquireThreadLock(redis, thread.id);
+    const lockAcquired = yield* threadLock.acquire(thread.id);
     if (!lockAcquired) {
       const trimmedText = currentMessage?.text?.trim();
       const hasAttachments = Boolean(currentMessage?.attachments?.length);
@@ -401,19 +468,23 @@ export const handleSlackMessage = async (
             ? "(user sent an attachment with no text)"
             : null;
       if (followUpText && currentMessage?.id && channelId) {
-        await enqueueFollowUp(redis, thread.id, channelId, {
+        yield* threadLock.enqueueFollowUp(thread.id, channelId, {
           messageId: currentMessage.id,
           text: followUpText,
         });
       }
-      logger.info(
-        "[agent] lock busy, enqueued follow-up",
-        followUpText?.slice(0, 80),
+      yield* Effect.logInfo("[agent] lock busy, enqueued follow-up").pipe(
+        Effect.annotateLogs({
+          followUpPreview: followUpText?.slice(0, 80) ?? "(none)",
+        }),
       );
       return;
     }
 
-    await thread.startTyping();
+    yield* Effect.tryPromise({
+      try: () => thread.startTyping(),
+      catch: (cause) => new AgentStreamError({ cause }),
+    });
 
     const traceId = isTracingEnabled ? getCurrentTraceId() : undefined;
     if (isTracingEnabled) {
@@ -425,58 +496,69 @@ export const handleSlackMessage = async (
     const messageTs = currentMessage?.id;
     const abortController =
       channelId && messageTs
-        ? registerActiveRun(channelId, messageTs)
+        ? yield* activeRuns.register(channelId, messageTs)
         : undefined;
 
     // Run independent async work in parallel: search context caching, MCP tool
     // loading, and thread state retrieval don't depend on each other.
-    const [, mcpSettled, stateSettled] = await Promise.allSettled([
-      cacheSlackSearchContext(thread, currentMessage),
-      userId
-        ? openMcpTools(userId, channelId, teamId)
-        : Promise.resolve(undefined as McpToolsResult | undefined),
-      thread.state as Promise<unknown>,
-    ]);
+    const [, mcpSettled, stateSettled] = yield* Effect.tryPromise({
+      try: () =>
+        Promise.allSettled([
+          cacheSlackSearchContext(thread, currentMessage),
+          userId
+            ? openMcpToolsAsync(userId, channelId, teamId)
+            : Promise.resolve(undefined as McpToolsResult | undefined),
+          thread.state as Promise<unknown>,
+        ]),
+      catch: (cause) => new AgentStreamError({ cause }),
+    });
 
     let mcpHandle: McpToolsResult | undefined;
     if (mcpSettled.status === "fulfilled" && mcpSettled.value) {
       mcpHandle = mcpSettled.value;
     } else if (mcpSettled.status === "rejected") {
-      logger.warn("[mcp] failed to load MCP tools:", mcpSettled.reason);
+      yield* Effect.logWarning("[mcp] failed to load MCP tools").pipe(
+        Effect.annotateLogs({ reason: String(mcpSettled.reason) }),
+      );
     }
 
     if (mcpHandle && mcpHandle.authNeeded.length > 0 && userId) {
-      const isFirstNotice = await tryMarkReauthNoticeSent(
-        redis,
+      const isFirstNotice = yield* threadLock.tryMarkReauthNoticeSent(
         thread.id,
         userId,
       );
       if (isFirstNotice) {
-        const pendingAuthStartUrls = await Promise.all(
-          mcpHandle.authNeeded.map(async (server) => ({
-            name: server.name,
-            authorizationUrl: await createAuthorizationStartUrl(
-              server.name,
-              server.authorizationUrl,
+        const pendingAuthStartUrls = yield* Effect.tryPromise({
+          try: () =>
+            Promise.all(
+              mcpHandle!.authNeeded.map(async (server) => ({
+                name: server.name,
+                authorizationUrl: await createAuthorizationStartUrl(
+                  server.name,
+                  server.authorizationUrl,
+                ),
+              })),
             ),
-          })),
-        );
+          catch: (cause) => new AgentStreamError({ cause }),
+        });
         slack
           .postEphemeral(thread.id, userId, {
             card: buildReauthCard(pendingAuthStartUrls),
           })
           .catch((ephemeralError: unknown) =>
-            logger.warn("[mcp] ephemeral auth notice failed:", ephemeralError),
+            console.warn("[mcp] ephemeral auth notice failed:", ephemeralError),
           );
       }
     }
 
-    try {
+    yield* Effect.gen(function* () {
       const rawThreadState =
         stateSettled.status === "fulfilled" ? stateSettled.value : undefined;
       const rawState = (rawThreadState ?? {}) as Record<string, unknown>;
       if (typeof rawState.messages === "string") {
-        rawState.messages = decryptJson<Array<ModelMessage>>(rawState.messages);
+        rawState.messages = yield* secureStore.decryptJson<Array<ModelMessage>>(
+          rawState.messages,
+        );
       }
       const parsedState = threadStateSchema.safeParse(rawState);
       const storedMessages: Array<ModelMessage> = parsedState.success
@@ -501,10 +583,14 @@ export const handleSlackMessage = async (
         ...(currentMessage ? [currentMessage] : []),
       ];
 
-      const [systemBuild, newAiMessages] = await Promise.all([
-        buildSystemMessages(state, teamId, userId, channelId),
-        ChatSDK.toAiMessages(newMessages, { includeNames: true }),
-      ]);
+      const [systemBuild, newAiMessages] = yield* Effect.tryPromise({
+        try: () =>
+          Promise.all([
+            buildSystemMessages(state, teamId, userId, channelId),
+            ChatSDK.toAiMessages(newMessages, { includeNames: true }),
+          ]),
+        catch: (cause) => new AgentStreamError({ cause }),
+      });
       const { messages: systemMessages, resolvedConfig } = systemBuild;
 
       let conversationMessages: Array<ModelMessage>;
@@ -514,12 +600,14 @@ export const handleSlackMessage = async (
         // No prior turn persisted — pull thread history from the adapter so the
         // model has the participants' prior context. Dedupe against the new
         // messages so we don't double-count the trigger.
-        const newIds = new Set(newMessages.map((m) => m.id));
+        const newIds = new Set(newMessages.map((message) => message.id));
         const historyMessages = thread.recentMessages.filter(
-          (m) => !newIds.has(m.id),
+          (message) => !newIds.has(message.id),
         );
-        const historyAiMessages = await ChatSDK.toAiMessages(historyMessages, {
-          includeNames: true,
+        const historyAiMessages = yield* Effect.tryPromise({
+          try: () =>
+            ChatSDK.toAiMessages(historyMessages, { includeNames: true }),
+          catch: (cause) => new AgentStreamError({ cause }),
         });
         conversationMessages = [...historyAiMessages, ...newAiMessages];
       }
@@ -536,11 +624,16 @@ export const handleSlackMessage = async (
 
       for (let round = 0; round < MAX_FOLLOW_UP_ROUNDS + 1; round++) {
         if (round > 0) {
-          await thread.refresh();
-          await thread.startTyping();
+          yield* Effect.tryPromise({
+            try: async () => {
+              await thread.refresh();
+              await thread.startTyping();
+            },
+            catch: (cause) => new AgentStreamError({ cause }),
+          });
         }
 
-        const roundResult = await runAgentRound({
+        const roundResult = yield* runAgentRound({
           thread,
           slack,
           state,
@@ -559,10 +652,10 @@ export const handleSlackMessage = async (
         if (roundResult.didPostMessage) didPostAnyMessage = true;
 
         if (round >= MAX_FOLLOW_UP_ROUNDS) break;
-        const drained = await drainFollowUps(redis, thread.id);
+        const drained = yield* threadLock.drainFollowUps(thread.id);
         if (drained.length === 0) break;
 
-        logger.info(
+        yield* Effect.logInfo(
           `[agent] drained ${drained.length} follow-up(s), starting round ${round + 2}`,
         );
         followUpMessages = drained;
@@ -574,32 +667,58 @@ export const handleSlackMessage = async (
         didPostAnyMessage &&
         channelId
       ) {
-        const isDebugChannel = await slack
-          .fetchChannelInfo(`slack:${channelId}`)
-          .then((channelInfo) => channelInfo.name === TRACE_FOOTER_CHANNEL_NAME)
-          .catch(() => false);
+        const isDebugChannel = yield* Effect.tryPromise({
+          try: () =>
+            slack
+              .fetchChannelInfo(`slack:${channelId}`)
+              .then(
+                (channelInfo) =>
+                  channelInfo.name === TRACE_FOOTER_CHANNEL_NAME,
+              )
+              .catch(() => false),
+          catch: () => new AgentStreamError({}),
+        });
 
         if (isDebugChannel) {
-          await postTraceFooter(thread, traceId, Date.now() - startedAt).catch(
-            (traceError: unknown) =>
-              logger.warn("[agent] failed to post trace footer:", traceError),
+          yield* Effect.tryPromise({
+            try: () =>
+              postTraceFooter(thread, traceId, Date.now() - startedAt),
+            catch: (cause) => new AgentStreamError({ cause }),
+          }).pipe(
+            Effect.catchCause((traceError) =>
+              Effect.logWarning("[agent] failed to post trace footer").pipe(
+                Effect.annotateLogs({ error: String(traceError) }),
+              ),
+            ),
           );
         }
       }
-    } finally {
-      if (channelId && messageTs) {
-        cleanupActiveRun(channelId, messageTs);
-      }
-      if (mcpHandle) {
-        await mcpHandle
-          .close()
-          .catch((closeError: unknown) =>
-            logger.warn("[mcp] close error:", closeError),
+    }).pipe(
+      Effect.ensuring(
+        Effect.gen(function* () {
+          if (channelId && messageTs) {
+            yield* activeRuns.cleanup(channelId, messageTs);
+          }
+          if (mcpHandle) {
+            yield* Effect.tryPromise({
+              try: () => mcpHandle!.close(),
+              catch: (cause) => new AgentStreamError({ cause }),
+            }).pipe(
+              Effect.catchCause((closeError) =>
+                Effect.logWarning("[mcp] close error").pipe(
+                  Effect.annotateLogs({ error: String(closeError) }),
+                ),
+              ),
+            );
+          }
+          yield* threadLock.release(thread.id).pipe(
+            Effect.catchCause((lockError) =>
+              Effect.logWarning("[agent] failed to release thread lock").pipe(
+                Effect.annotateLogs({ error: String(lockError) }),
+              ),
+            ),
           );
-      }
-      await releaseThreadLock(redis, thread.id).catch((lockError: unknown) =>
-        logger.warn("[agent] failed to release thread lock:", lockError),
-      );
-    }
+        }),
+      ),
+    );
   });
-};

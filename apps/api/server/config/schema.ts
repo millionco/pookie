@@ -1,67 +1,61 @@
-import { z } from "zod";
+import { Schema } from "effect"
 
-export const personalityOptionSchema = z.enum([
-  "cute",
-  "balanced",
-  "professional",
-]);
+export const PersonalityOptionSchema = Schema.Literals(["cute", "balanced", "professional"])
+export type PersonalityOption = typeof PersonalityOptionSchema.Type
 
-export type PersonalityOption = z.infer<typeof personalityOptionSchema>;
+export const ReasoningEffortOptionSchema = Schema.Literals(["minimal", "medium", "high"])
+export type ReasoningEffortOption = typeof ReasoningEffortOptionSchema.Type
 
-export const reasoningEffortOptionSchema = z.enum([
-  "minimal",
-  "medium",
-  "high",
-]);
+const EMOJI_SHORTCODE_PATTERN = /^[a-z0-9_+-]+$/
 
-export type ReasoningEffortOption = z.infer<typeof reasoningEffortOptionSchema>;
+const ReactionEmojiSchema = Schema.Trim.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(64),
+  Schema.isPattern(EMOJI_SHORTCODE_PATTERN),
+)
 
-const reactionEmojiSchema = z
-  .string()
-  .trim()
-  .min(1)
-  .max(64)
-  .regex(
-    /^[a-z0-9_+-]+$/,
-    "reaction emoji must be a slack emoji shortcode (letters, numbers, underscores, +, -)",
-  );
+export const PookieConfigSchema = Schema.Struct({
+  personality: PersonalityOptionSchema,
+  reactionEmoji: ReactionEmojiSchema,
+  cards: Schema.Boolean,
+  tracesFooter: Schema.Boolean,
+  reasoningEffort: ReasoningEffortOptionSchema,
+})
 
-export const pookieConfigSchema = z.object({
-  personality: personalityOptionSchema,
-  reactionEmoji: reactionEmojiSchema,
-  cards: z.boolean(),
-  tracesFooter: z.boolean(),
-  reasoningEffort: reasoningEffortOptionSchema,
-});
+export type PookieConfig = typeof PookieConfigSchema.Type
 
-export type PookieConfig = z.infer<typeof pookieConfigSchema>;
+export const PookieConfigPartialSchema = Schema.Struct({
+  personality: Schema.optional(PersonalityOptionSchema),
+  reactionEmoji: Schema.optional(ReactionEmojiSchema),
+  cards: Schema.optional(Schema.Boolean),
+  tracesFooter: Schema.optional(Schema.Boolean),
+  reasoningEffort: Schema.optional(ReasoningEffortOptionSchema),
+})
 
-export const pookieConfigPartialSchema = pookieConfigSchema.partial();
+export type PookieConfigPartial = typeof PookieConfigPartialSchema.Type
 
-export type PookieConfigPartial = z.infer<typeof pookieConfigPartialSchema>;
-
-export type PookieConfigKey = keyof PookieConfig;
+export type PookieConfigKey = keyof PookieConfig
 
 export interface PookieConfigScopeGlobal {
-  kind: "global";
-  teamId: string;
+  kind: "global"
+  teamId: string
 }
 
 export interface PookieConfigScopeChannel {
-  kind: "channel";
-  channelId: string;
-  teamId: string;
+  kind: "channel"
+  channelId: string
+  teamId: string
 }
 
 export interface PookieConfigScopeUser {
-  kind: "user";
-  userId: string;
-  teamId: string;
+  kind: "user"
+  userId: string
+  teamId: string
 }
 
 export type PookieConfigScope =
   | PookieConfigScopeGlobal
   | PookieConfigScopeChannel
-  | PookieConfigScopeUser;
+  | PookieConfigScopeUser
 
-export type PookieConfigScopeKind = PookieConfigScope["kind"];
+export type PookieConfigScopeKind = PookieConfigScope["kind"]

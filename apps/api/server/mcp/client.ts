@@ -1,7 +1,10 @@
-import { auth, createMCPClient } from "@ai-sdk/mcp";
+import { Effect } from "effect"
+import { auth, createMCPClient } from "@ai-sdk/mcp"
 
-import { createMcpAuthProvider, McpOAuthRedirectError } from "./auth-provider";
-import { MCP_TOOL_NAME_SEPARATOR } from "./constants";
+import { McpAuthError, McpConnectionError } from "../errors"
+import { appRuntime } from "../runtime"
+import { createMcpAuthProvider, McpOAuthRedirectError } from "./auth-provider"
+import { MCP_TOOL_NAME_SEPARATOR } from "./constants"
 import {
   clearPendingAuthUrl,
   consumeOAuthState,
@@ -10,28 +13,28 @@ import {
   loadOAuthTokens,
   loadPendingAuthUrl,
   oauthOwnerId,
-} from "./store";
+} from "./store"
 
 import type {
   MCPClient,
   MCPClientConfig,
   OAuthClientProvider,
-} from "@ai-sdk/mcp";
-import type * as AI from "ai";
+} from "@ai-sdk/mcp"
+import type * as AI from "ai"
 
-import type { McpScope, McpServerConfig } from "./store";
+import type { McpScope, McpServerConfig } from "./store"
 
 interface McpTransportAuth {
-  authProvider?: OAuthClientProvider;
-  headers?: Record<string, string>;
+  authProvider?: OAuthClientProvider
+  headers?: Record<string, string>
 }
 
 const channelIdFromScope = (scope: McpScope): string | undefined =>
-  scope.kind === "channel" ? scope.channelId : undefined;
+  scope.kind === "channel" ? scope.channelId : undefined
 
 const buildBearerHeaders = (token: string): Record<string, string> => ({
   Authorization: `Bearer ${token}`,
-});
+})
 
 const connectWithTransportFallback = async (
   url: string,
@@ -39,40 +42,40 @@ const connectWithTransportFallback = async (
 ): Promise<MCPClient> => {
   const transportConfig = (type: "http" | "sse"): MCPClientConfig => ({
     transport: { type, url, ...transportAuth },
-  });
+  })
 
   try {
-    return await createMCPClient(transportConfig("http"));
+    return await createMCPClient(transportConfig("http"))
   } catch (httpError) {
     const isMethodNotAllowed =
-      httpError instanceof Error && httpError.message.includes("405");
-    if (!isMethodNotAllowed) throw httpError;
-    return createMCPClient(transportConfig("sse"));
+      httpError instanceof Error && httpError.message.includes("405")
+    if (!isMethodNotAllowed) throw httpError
+    return createMCPClient(transportConfig("sse"))
   }
-};
+}
 
 export interface McpRegistrationResult {
-  connected: boolean;
-  authorizationUrl?: string;
-  toolCount?: number;
+  connected: boolean
+  authorizationUrl?: string
+  toolCount?: number
 }
 
 export interface McpServerAuthNeeded {
-  name: string;
-  authorizationUrl: string;
+  name: string
+  authorizationUrl: string
 }
 
 export interface McpServerError {
-  name: string;
-  message: string;
+  name: string
+  message: string
 }
 
 export interface McpToolsResult {
-  tools: Record<string, AI.Tool>;
-  close: () => Promise<void>;
-  servers: Array<{ name: string; toolCount: number }>;
-  authNeeded: McpServerAuthNeeded[];
-  errors: McpServerError[];
+  tools: Record<string, AI.Tool>
+  close: () => Promise<void>
+  servers: Array<{ name: string; toolCount: number }>
+  authNeeded: McpServerAuthNeeded[]
+  errors: McpServerError[]
 }
 
 const resolveTransportAuth = (
@@ -81,7 +84,7 @@ const resolveTransportAuth = (
   teamId: string,
 ): McpTransportAuth => {
   if (config.token) {
-    return { headers: buildBearerHeaders(config.token) };
+    return { headers: buildBearerHeaders(config.token) }
   }
   return {
     authProvider: createMcpAuthProvider({
@@ -92,8 +95,8 @@ const resolveTransportAuth = (
       channelId: channelIdFromScope(config.scope),
       teamId,
     }),
-  };
-};
+  }
+}
 
 // Pre-authenticate with a single sequential auth() call before creating the
 // MCP client. The HTTP transport fires openInboundSse concurrently with send,
@@ -118,260 +121,326 @@ const resolveTransportAuth = (
 // @ai-sdk/mcp silently swallows before falling through to re-auth).
 // In that case, fall back to the existing tokens and let the transport
 // handle 401s if the access_token is actually expired.
-const loadOAuthTokensWithFallback = async (
+const loadOAuthTokensWithFallback = (
   ownerId: string,
   userId: string,
   serverName: string,
   teamId: string,
-) => {
-  const tokens = await loadOAuthTokens(ownerId, serverName, teamId);
-  if (tokens) return tokens;
-  if (ownerId !== userId) return loadOAuthTokens(userId, serverName, teamId);
-  return undefined;
-};
+) =>
+  Effect.gen(function* () {
+    const tokens = yield* loadOAuthTokens(ownerId, serverName, teamId)
+    if (tokens) return tokens
+    if (ownerId !== userId)
+      return yield* loadOAuthTokens(userId, serverName, teamId)
+    return undefined
+  })
 
-const ensureOAuth = async (
+const ensureOAuth = (
   userId: string,
   config: McpServerConfig,
   teamId: string,
-): Promise<void> => {
-  if (config.token) return;
+) =>
+  Effect.gen(function* () {
+    if (config.token) return
 
-  const pendingAuthUrl = await loadPendingAuthUrl(userId, config.name, teamId);
-  if (pendingAuthUrl) {
-    throw new McpOAuthRedirectError(pendingAuthUrl, config.url);
-  }
-
-  const ownerId = oauthOwnerId(config.scope, userId);
-  const existingTokens = await loadOAuthTokensWithFallback(
-    ownerId,
-    userId,
-    config.name,
-    teamId,
-  );
-  if (existingTokens && !existingTokens.refresh_token) return;
-
-  const authProvider = createMcpAuthProvider({
-    userId,
-    tokenOwnerId: ownerId,
-    serverName: config.name,
-    serverUrl: config.url,
-    channelId: channelIdFromScope(config.scope),
-    teamId,
-  });
-
-  try {
-    await auth(authProvider, { serverUrl: config.url });
-  } catch (error) {
-    if (error instanceof McpOAuthRedirectError) {
-      // auth() wanted to redirect despite us having tokens. Re-check Redis
-      // (auth may have called invalidateCredentials("all"), clearing them).
-      const currentTokens = await loadOAuthTokensWithFallback(
-        ownerId,
-        userId,
-        config.name,
-        teamId,
-      );
-      if (currentTokens) {
-        await clearPendingAuthUrl(userId, config.name, teamId);
-        return;
-      }
+    const pendingAuthUrl = yield* loadPendingAuthUrl(
+      userId,
+      config.name,
+      teamId,
+    )
+    if (pendingAuthUrl) {
+      return yield* Effect.fail(
+        new McpOAuthRedirectError(pendingAuthUrl, config.url),
+      )
     }
-    throw error;
-  }
-};
 
-export const tryRegister = async (
-  userId: string,
-  config: McpServerConfig,
-  teamId: string,
-): Promise<McpRegistrationResult> => {
-  try {
-    await ensureOAuth(userId, config, teamId);
-  } catch (error) {
-    if (error instanceof McpOAuthRedirectError) {
-      return {
-        connected: false,
-        authorizationUrl: error.authorizationUrl,
-      };
-    }
-    throw error;
-  }
+    const ownerId = oauthOwnerId(config.scope, userId)
+    const existingTokens = yield* loadOAuthTokensWithFallback(
+      ownerId,
+      userId,
+      config.name,
+      teamId,
+    )
+    if (existingTokens && !existingTokens.refresh_token) return
 
-  const transportAuth = resolveTransportAuth(userId, config, teamId);
-  const client = await connectWithTransportFallback(config.url, transportAuth);
-  const toolSet = await client.tools();
-  const toolCount = Object.keys(toolSet).length;
-  await client.close();
+    const authProvider = createMcpAuthProvider({
+      userId,
+      tokenOwnerId: ownerId,
+      serverName: config.name,
+      serverUrl: config.url,
+      channelId: channelIdFromScope(config.scope),
+      teamId,
+    })
 
-  return { connected: true, toolCount };
-};
+    yield* Effect.tryPromise({
+      try: () => auth(authProvider, { serverUrl: config.url }),
+      catch: (cause) =>
+        cause instanceof McpOAuthRedirectError
+          ? cause
+          : new McpAuthError({
+              server: config.name,
+              reason:
+                cause instanceof Error ? cause.message : String(cause),
+            }),
+    }).pipe(
+      Effect.catchCause((error) =>
+        Effect.gen(function* () {
+          if (!(error instanceof McpOAuthRedirectError)) {
+            return yield* Effect.fail(error)
+          }
+          // auth() wanted to redirect despite us having tokens. Re-check Redis
+          // (auth may have called invalidateCredentials("all"), clearing them).
+          const currentTokens = yield* loadOAuthTokensWithFallback(
+            ownerId,
+            userId,
+            config.name,
+            teamId,
+          )
+          if (currentTokens) {
+            yield* clearPendingAuthUrl(userId, config.name, teamId)
+            return
+          }
+          return yield* Effect.fail(error)
+        }),
+      ),
+    )
+  })
 
-export const finishOAuth = async ({
-  code,
-  state,
-}: {
-  code: string;
-  state: string;
-}): Promise<{
-  userId: string;
-  serverName: string;
-  channelId?: string;
-  teamId: string;
-}> => {
-  const payload = await consumeOAuthState(state);
-  if (!payload) {
-    throw new Error("Invalid or expired OAuth state token");
-  }
-
-  const { userId, serverName, channelId, teamId } = payload;
-
-  if (!teamId) {
-    throw new Error(
-      "OAuth state missing teamId — re-run /mcp-add to start a fresh flow",
-    );
-  }
-
-  const config = await findConfigByName(userId, serverName, channelId, teamId);
-  if (!config) {
-    throw new Error(`MCP server "${serverName}" not found`);
-  }
-
-  const authProvider = createMcpAuthProvider({
-    userId,
-    tokenOwnerId: oauthOwnerId(config.scope, userId),
-    serverName,
-    serverUrl: config.url,
-    channelId: channelIdFromScope(config.scope),
-    teamId,
-  });
-
-  await auth(authProvider, {
-    serverUrl: config.url,
-    authorizationCode: code,
-  });
-
-  await clearPendingAuthUrl(userId, serverName, teamId);
-
-  return { userId, serverName, channelId, teamId };
-};
-
-const findConfigByName = async (
+const findConfigByName = (
   userId: string,
   serverName: string,
   channelId: string | undefined,
   teamId: string,
-): Promise<McpServerConfig | null> => {
-  const scopes: McpScope[] = [
-    { kind: "user", userId, teamId },
-    { kind: "global", teamId },
-  ];
+) =>
+  Effect.gen(function* () {
+    const scopes: McpScope[] = [
+      { kind: "user", userId, teamId },
+      { kind: "global", teamId },
+    ]
 
-  if (channelId) {
-    scopes.push({ kind: "channel", channelId, teamId });
-  }
-
-  for (const scope of scopes) {
-    const config = await getServerConfig(scope, serverName);
-    if (config) return config;
-  }
-
-  return null;
-};
-
-export const openMcpTools = async (
-  userId: string,
-  channelId: string | undefined,
-  teamId: string,
-): Promise<McpToolsResult> => {
-  const configs = await listVisibleServers(userId, channelId, teamId);
-  const emptyResult: McpToolsResult = {
-    tools: {},
-    close: async () => {},
-    servers: [],
-    authNeeded: [],
-    errors: [],
-  };
-
-  if (configs.length === 0) {
-    return emptyResult;
-  }
-
-  const clients: MCPClient[] = [];
-  const allTools: Record<string, AI.Tool> = {};
-  const serverSummaries: Array<{ name: string; toolCount: number }> = [];
-  const authNeeded: McpServerAuthNeeded[] = [];
-  const errors: McpServerError[] = [];
-
-  const classifyError = (config: McpServerConfig, error: unknown) => {
-    if (error instanceof McpOAuthRedirectError) {
-      authNeeded.push({
-        name: config.name,
-        authorizationUrl: error.authorizationUrl,
-      });
-    } else {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      console.warn(`[mcp] failed for ${config.name}:`, error);
-      errors.push({ name: config.name, message: errorMessage });
+    if (channelId) {
+      scopes.push({ kind: "channel", channelId, teamId })
     }
-  };
 
-  const connectionResults = await Promise.allSettled(
-    configs.map(async (config) => {
-      try {
-        await ensureOAuth(userId, config, teamId);
-      } catch (authError) {
-        classifyError(config, authError);
-        return null;
+    for (const scope of scopes) {
+      const config = yield* getServerConfig(scope, serverName)
+      if (config) return config
+    }
+
+    return null
+  })
+
+export const tryRegister = Effect.fn("McpClient.tryRegister")(
+  (userId: string, config: McpServerConfig, teamId: string) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* ensureOAuth(userId, config, teamId)
+        const transportAuth = resolveTransportAuth(userId, config, teamId)
+
+        const client = yield* Effect.acquireRelease(
+          Effect.tryPromise({
+            try: () =>
+              connectWithTransportFallback(config.url, transportAuth),
+            catch: (cause) =>
+              new McpConnectionError({ server: config.name, cause }),
+          }),
+          (innerClient) =>
+            Effect.promise(() => innerClient.close().catch(() => {})),
+        )
+
+        const toolSet = yield* Effect.tryPromise({
+          try: () => client.tools(),
+          catch: (cause) =>
+            new McpConnectionError({ server: config.name, cause }),
+        })
+        const toolCount = Object.keys(toolSet).length
+        return { connected: true, toolCount } as McpRegistrationResult
+      }),
+    ).pipe(
+      Effect.catchCause((error) =>
+        error instanceof McpOAuthRedirectError
+          ? Effect.succeed({
+              connected: false,
+              authorizationUrl: error.authorizationUrl,
+            } as McpRegistrationResult)
+          : Effect.fail(error),
+      ),
+    ),
+)
+
+export const finishOAuth = Effect.fn("McpClient.finishOAuth")(
+  ({ code, state }: { code: string; state: string }) =>
+    Effect.gen(function* () {
+      const payload = yield* consumeOAuthState(state)
+      if (!payload) {
+        return yield* Effect.fail(
+          new McpAuthError({
+            server: "unknown",
+            reason: "Invalid or expired OAuth state token",
+          }),
+        )
       }
 
-      const transportAuth = resolveTransportAuth(userId, config, teamId);
+      const { userId, serverName, channelId, teamId } = payload
 
-      try {
-        const client = await connectWithTransportFallback(
-          config.url,
-          transportAuth,
-        );
-        return { config, client };
-      } catch (connectError) {
-        classifyError(config, connectError);
-        return null;
+      if (!teamId) {
+        return yield* Effect.fail(
+          new McpAuthError({
+            server: serverName,
+            reason:
+              "OAuth state missing teamId — re-run /mcp-add to start a fresh flow",
+          }),
+        )
       }
+
+      const config = yield* findConfigByName(
+        userId,
+        serverName,
+        channelId,
+        teamId,
+      )
+      if (!config) {
+        return yield* Effect.fail(
+          new McpAuthError({
+            server: serverName,
+            reason: `MCP server "${serverName}" not found`,
+          }),
+        )
+      }
+
+      const authProvider = createMcpAuthProvider({
+        userId,
+        tokenOwnerId: oauthOwnerId(config.scope, userId),
+        serverName,
+        serverUrl: config.url,
+        channelId: channelIdFromScope(config.scope),
+        teamId,
+      })
+
+      yield* Effect.tryPromise({
+        try: () =>
+          auth(authProvider, {
+            serverUrl: config.url,
+            authorizationCode: code,
+          }),
+        catch: (cause) =>
+          new McpAuthError({
+            server: serverName,
+            reason:
+              cause instanceof Error ? cause.message : String(cause),
+          }),
+      })
+
+      yield* clearPendingAuthUrl(userId, serverName, teamId)
+
+      return { userId, serverName, channelId, teamId }
     }),
-  );
+)
 
-  for (const result of connectionResults) {
-    if (result.status === "rejected" || !result.value) continue;
+export const openMcpTools = Effect.fn("McpClient.openMcpTools")(
+  (userId: string, channelId: string | undefined, teamId: string) =>
+    Effect.gen(function* () {
+      const configs = yield* listVisibleServers(userId, channelId, teamId)
 
-    const { config, client } = result.value;
-    clients.push(client);
-
-    try {
-      const toolSet = await client.tools();
-      let toolCount = 0;
-
-      for (const [toolName, tool] of Object.entries(toolSet)) {
-        const prefixedName = `mcp${MCP_TOOL_NAME_SEPARATOR}${config.name}${MCP_TOOL_NAME_SEPARATOR}${toolName}`;
-        allTools[prefixedName] = tool as AI.Tool;
-        toolCount++;
+      const emptyResult: McpToolsResult = {
+        tools: {},
+        close: async () => {},
+        servers: [],
+        authNeeded: [],
+        errors: [],
       }
 
-      serverSummaries.push({ name: config.name, toolCount });
-    } catch (toolError) {
-      classifyError(config, toolError);
-    }
-  }
+      if (configs.length === 0) return emptyResult
 
-  const close = async () => {
-    await Promise.allSettled(clients.map((innerClient) => innerClient.close()));
-  };
+      const allTools: Record<string, AI.Tool> = {}
+      const serverSummaries: Array<{ name: string; toolCount: number }> = []
+      const authNeeded: McpServerAuthNeeded[] = []
+      const serverErrors: McpServerError[] = []
+      const connectedClients: MCPClient[] = []
 
-  return {
-    tools: allTools,
-    close,
-    servers: serverSummaries,
-    authNeeded,
-    errors,
-  };
-};
+      const classifyError = (config: McpServerConfig, error: unknown) => {
+        if (error instanceof McpOAuthRedirectError) {
+          authNeeded.push({
+            name: config.name,
+            authorizationUrl: error.authorizationUrl,
+          })
+        } else {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error)
+          console.warn(`[mcp] failed for ${config.name}:`, error)
+          serverErrors.push({ name: config.name, message: errorMessage })
+        }
+      }
+
+      yield* Effect.forEach(
+        configs,
+        (config) =>
+          Effect.gen(function* () {
+            yield* ensureOAuth(userId, config, teamId)
+            const transportAuth = resolveTransportAuth(
+              userId,
+              config,
+              teamId,
+            )
+
+            const client = yield* Effect.tryPromise({
+              try: () =>
+                connectWithTransportFallback(
+                  config.url,
+                  transportAuth,
+                ),
+              catch: (cause) =>
+                new McpConnectionError({
+                  server: config.name,
+                  cause,
+                }),
+            })
+            connectedClients.push(client)
+
+            const toolSet = yield* Effect.tryPromise({
+              try: () => client.tools(),
+              catch: (cause) =>
+                new McpConnectionError({
+                  server: config.name,
+                  cause,
+                }),
+            })
+
+            let toolCount = 0
+            for (const [toolName, tool] of Object.entries(toolSet)) {
+              const prefixedName = `mcp${MCP_TOOL_NAME_SEPARATOR}${config.name}${MCP_TOOL_NAME_SEPARATOR}${toolName}`
+              allTools[prefixedName] = tool as AI.Tool
+              toolCount++
+            }
+            serverSummaries.push({ name: config.name, toolCount })
+          }).pipe(
+            Effect.catchCause((error) => {
+              classifyError(config, error)
+              return Effect.void
+            }),
+          ),
+        { concurrency: "unbounded" },
+      )
+
+      return {
+        tools: allTools,
+        close: async () => {
+          await Promise.allSettled(
+            connectedClients.map((innerClient) => innerClient.close().catch(() => {})),
+          )
+        },
+        servers: serverSummaries,
+        authNeeded,
+        errors: serverErrors,
+      } satisfies McpToolsResult
+    }),
+)
+
+export const openMcpToolsAsync = (...args: Parameters<typeof openMcpTools>) =>
+  appRuntime.runPromise(openMcpTools(...args))
+
+export const tryRegisterAsync = (...args: Parameters<typeof tryRegister>) =>
+  appRuntime.runPromise(tryRegister(...args))
+
+export const finishOAuthAsync = (...args: Parameters<typeof finishOAuth>) =>
+  appRuntime.runPromise(finishOAuth(...args))
