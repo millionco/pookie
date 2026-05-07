@@ -17,6 +17,7 @@ import {
 import type * as AI from "ai";
 
 import type { PookieToolError } from "../../agent/tool-result";
+import type { McpShimValidation } from "./types";
 
 interface RipplingToolContext {
   token: string;
@@ -433,15 +434,9 @@ export const buildRipplingTools = (token: string): Record<string, AI.Tool> => {
   };
 };
 
-export interface RipplingShimValidationResult {
-  ok: boolean;
-  toolCount: number;
-  message?: string;
-}
-
 export const validateRipplingShim = async (
   token: string,
-): Promise<RipplingShimValidationResult> => {
+): Promise<McpShimValidation> => {
   const probe = await probeRipplingToken(token);
   const toolCount = Object.keys(buildRipplingTools(token)).length;
 
