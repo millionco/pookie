@@ -14,6 +14,12 @@ export interface McpPreset {
   // surfaced first without removing the preset from `/mcp-add` or other
   // entry points).
   hiddenByDefault?: boolean;
+  // Identifier into MCP_SHIMS. When set, Pookie does NOT open an MCP
+  // transport against `url`; instead it builds tools locally from the
+  // shim's REST wrappers. The agent still sees them as `mcp_<name>_*`
+  // tools so prompts, search routing, and system reminders treat the
+  // integration uniformly with real MCP servers.
+  shim?: string;
 }
 
 export const MCP_PRESETS: Record<string, McpPreset> = {
@@ -235,6 +241,34 @@ export const MCP_PRESETS: Record<string, McpPreset> = {
       "search the web for best practices on slack bot onboarding",
     ],
   },
+  rippling: {
+    name: "rippling",
+    displayName: "Rippling",
+    url: "https://api.rippling.com",
+    description: "hr, employees, leave",
+    authType: "token",
+    tokenHelpUrl: "https://app.rippling.com/developer/apiKeys",
+    shim: "rippling",
+    searchTools: [
+      "list_employees",
+      "get_employee",
+      "list_employees_including_terminated",
+      "get_current_company",
+      "get_departments",
+      "get_work_locations",
+      "get_teams",
+      "get_levels",
+      "get_company_leave_types",
+      "get_current_user",
+      "list_leave_balances",
+      "get_leave_balance",
+      "list_leave_requests",
+    ],
+    exampleQueries: [
+      "who's out on leave this week according to rippling?",
+      "list everyone in the engineering department in rippling",
+    ],
+  },
 };
 
 const resolveByPrefix = <T>(
@@ -260,3 +294,6 @@ export const resolvePreset = (name: string): McpPreset | undefined =>
 
 export const getPresetDisplayName = (preset: McpPreset): string =>
   preset.displayName ?? preset.name;
+
+export const resolveShimName = (serverName: string): string | undefined =>
+  resolvePreset(serverName)?.shim;
