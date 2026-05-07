@@ -1,5 +1,5 @@
 import { Effect, Layer } from "effect"
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it } from "vitest"
 
 import { Redis } from "../server/infra/redis"
 import { ThreadLock } from "../server/agent/thread-lock"

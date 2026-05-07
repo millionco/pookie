@@ -1,4 +1,5 @@
-import { Effect, Option, Schema, SchemaAST } from "effect"
+import { Effect, Option, SchemaAST } from "effect"
+import type { Schema } from "effect"
 import z from "zod"
 
 export const ZodOverride: unique symbol = Symbol.for("effect-zod/override")

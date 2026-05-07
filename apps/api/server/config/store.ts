@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 
-import { ConfigError, RedisError } from "../errors"
+import { ConfigError } from "../errors"
 import { Redis } from "../infra/redis"
 import { POOKIE_CONFIG_PREFIX } from "./constants"
 import { PookieConfigPartialSchema } from "./schema"
