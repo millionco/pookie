@@ -14,11 +14,7 @@ import {
 import { MCP_PRESETS } from "./mcp/presets";
 import { redis } from "./mcp/redis";
 import { slackBot } from "./slack-bot";
-import {
-  hasBotParticipatedInThread,
-  hasSlackBotMention,
-  isTopLevelSlackMessage,
-} from "./slack/message-routing";
+import { isSlackBotAddressed } from "./slack/message-routing";
 import {
   handleOnboardingConnectAction,
   onboardingConnectActionIds,
@@ -30,8 +26,6 @@ import { FULL_HELP_TEXT, welcomeOnBotChannelJoin } from "./slack/welcome";
 
 import type { SlackAdapter } from "@chat-adapter/slack";
 import type { Message, Thread } from "chat";
-
-import type { SlackMessageRaw } from "./slack/message-routing";
 
 export { slackBot };
 
@@ -47,17 +41,6 @@ const reactToNewThread = async (
   } catch (reactionError) {
     console.warn("[new-thread-reaction] failed", reactionError);
   }
-};
-
-const subscribeForFallback = async (
-  thread: Thread,
-  logPrefix: string,
-): Promise<void> => {
-  await thread
-    .subscribe()
-    .catch((subscribeError: unknown) =>
-      console.warn(`${logPrefix} subscribe failed`, subscribeError),
-    );
 };
 
 const MCP_SLASH_COMMANDS = [
@@ -214,18 +197,22 @@ slackBot.onNewMention(async (thread, message, context) => {
 
 // Once pookie is subscribed to a thread (set by onNewMention /
 // onDirectMessage / the catch-all below), the SDK routes every follow-up
-// here — including non-mention replies. We answer them all: the bot only
-// gets subscribed because it was explicitly engaged, so a human follow-up
-// in this thread is by definition someone continuing the conversation.
-// Bot/self messages are still filtered to prevent reply loops.
+// here — including non-mention replies. We deliberately ignore non-mention
+// follow-ups: pookie only speaks when it is explicitly @-mentioned, so a
+// plain reply in a subscribed thread is two humans talking, not a request
+// for pookie. The thread stays subscribed so the next @-mention still lands
+// here. Bot/self messages are filtered to prevent reply loops.
 slackBot.onSubscribedMessage(async (thread, message, context) => {
   if (message?.author?.isMe || message?.author?.isBot === true) return;
+
+  const slack: SlackAdapter = slackBot.getAdapter("slack");
+  if (!isSlackBotAddressed(message, slack.botUserId)) return;
 
   await thread.refresh();
   await handleSlackMessage(thread, message, context?.skipped);
 });
 
-// Catch-all for three cases the typed handlers miss:
+// Catch-all for @mentions the typed handlers miss:
 //
 // 1. Channel @mentions where Slack's `message` event wins the dedupe race
 //    against `app_mention`. Both events share the same ts; the SDK dedupes
@@ -237,35 +224,14 @@ slackBot.onSubscribedMessage(async (thread, message, context) => {
 //    @mention inside a thread the bot hasn't joined yet needs explicit
 //    handling here.
 //
-// 3. Thread follow-ups where subscribe() didn't persist (e.g. Redis eviction).
+// Non-mention messages are ignored — pookie requires an explicit @-mention.
 slackBot.onNewMessage(/.*/, async (thread, message, context) => {
   if (message?.author?.isMe || message?.author?.isBot === true) return;
 
-  const raw = message?.raw as SlackMessageRaw | undefined;
   const slack: SlackAdapter = slackBot.getAdapter("slack");
-  const hasBotMention = hasSlackBotMention(raw?.text, slack.botUserId);
+  if (!isSlackBotAddressed(message, slack.botUserId)) return;
 
-  if (isTopLevelSlackMessage(raw)) {
-    if (!hasBotMention) return;
-
-    await thread.subscribe();
-    void reactToNewThread(thread, message);
-    await handleSlackMessage(thread, message, context?.skipped);
-    return;
-  }
-
-  if (hasBotMention) {
-    await thread.subscribe();
-    void reactToNewThread(thread, message);
-    await handleSlackMessage(thread, message, context?.skipped);
-    return;
-  }
-
-  await thread.refresh();
-
-  if (!hasBotParticipatedInThread(thread.recentMessages, slack.botUserId))
-    return;
-
-  await subscribeForFallback(thread, "[thread-followup-fallback]");
+  await thread.subscribe();
+  void reactToNewThread(thread, message);
   await handleSlackMessage(thread, message, context?.skipped);
 });
