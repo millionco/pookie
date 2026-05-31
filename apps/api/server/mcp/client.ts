@@ -2,6 +2,8 @@ import { auth, createMCPClient } from "@ai-sdk/mcp";
 
 import { createMcpAuthProvider, McpOAuthRedirectError } from "./auth-provider";
 import { MCP_TOOL_NAME_SEPARATOR } from "./constants";
+import { resolveShimName } from "./presets";
+import { resolveShim } from "./shims";
 import {
   clearPendingAuthUrl,
   consumeOAuthState,
@@ -181,11 +183,116 @@ const ensureOAuth = async (
   }
 };
 
+// Shimmed integrations (e.g. Rippling) are exposed to the agent as if they
+// were MCP servers, but Pookie hosts the tools locally and skips the MCP
+// transport entirely. Register/open paths short-circuit to the shim's
+// `buildTools` so the same `mcp_<server>_<tool>` naming and prompt routing
+// apply uniformly.
+const missingShimTokenMessage = (serverName: string): string =>
+  `${serverName} requires an API key. re-run \`/mcp-add ${serverName} <key>\``;
+
+export const tryRegisterShim = async (
+  config: McpServerConfig,
+): Promise<McpRegistrationResult | null> => {
+  const shimName = resolveShimName(config.name);
+  if (!shimName) return null;
+
+  const shim = resolveShim(shimName);
+  if (!shim) return null;
+
+  if (!config.token) {
+    throw new Error(missingShimTokenMessage(config.name));
+  }
+
+  const validation = await shim.validate(config.token);
+  if (!validation.ok) {
+    throw new Error(validation.message ?? `${config.name} validation failed`);
+  }
+
+  return { connected: true, toolCount: validation.toolCount };
+};
+
+const prefixToolName = (serverName: string, toolName: string): string =>
+  `mcp${MCP_TOOL_NAME_SEPARATOR}${serverName}${MCP_TOOL_NAME_SEPARATOR}${toolName}`;
+
+export interface ShimIngestionEntry {
+  config: McpServerConfig;
+  // null + error means the shim resolved but couldn't be loaded (missing
+  // token, malformed registry entry); null + no error means the config
+  // does not resolve to a shim and should fall through to the MCP
+  // transport path.
+  tools: Record<string, AI.Tool> | null;
+  error?: McpServerError;
+}
+
+const tryBuildShimTools = (
+  config: McpServerConfig,
+): ShimIngestionEntry | null => {
+  const shimName = resolveShimName(config.name);
+  if (!shimName) return null;
+
+  const shim = resolveShim(shimName);
+  if (!shim) return null;
+
+  if (!config.token) {
+    return {
+      config,
+      tools: null,
+      error: {
+        name: config.name,
+        message: missingShimTokenMessage(config.name),
+      },
+    };
+  }
+
+  try {
+    return { config, tools: shim.buildTools(config.token) };
+  } catch (caughtError) {
+    const message =
+      caughtError instanceof Error ? caughtError.message : String(caughtError);
+    console.warn(
+      `[mcp-shim] failed to build tools for ${config.name}:`,
+      caughtError,
+    );
+    return {
+      config,
+      tools: null,
+      error: { name: config.name, message },
+    };
+  }
+};
+
+export interface PartitionedConfigs {
+  shimEntries: ShimIngestionEntry[];
+  transportConfigs: McpServerConfig[];
+}
+
+export const partitionShimConfigs = (
+  configs: McpServerConfig[],
+): PartitionedConfigs => {
+  const shimEntries: ShimIngestionEntry[] = [];
+  const transportConfigs: McpServerConfig[] = [];
+
+  for (const config of configs) {
+    const entry = tryBuildShimTools(config);
+    if (entry === null) {
+      transportConfigs.push(config);
+    } else {
+      shimEntries.push(entry);
+    }
+  }
+
+  return { shimEntries, transportConfigs };
+};
+
 export const tryRegister = async (
   userId: string,
   config: McpServerConfig,
   teamId: string,
 ): Promise<McpRegistrationResult> => {
+  const shimResult = await tryRegisterShim(config);
+  if (shimResult) return shimResult;
+
   try {
     await ensureOAuth(userId, config, teamId);
   } catch (error) {
@@ -317,8 +424,29 @@ export const openMcpTools = async (
     }
   };
 
+  const registerToolSet = (
+    config: McpServerConfig,
+    toolSet: Record<string, AI.Tool>,
+  ): void => {
+    let toolCount = 0;
+    for (const [toolName, tool] of Object.entries(toolSet)) {
+      allTools[prefixToolName(config.name, toolName)] = tool;
+      toolCount++;
+    }
+    serverSummaries.push({ name: config.name, toolCount });
+  };
+
+  const { shimEntries, transportConfigs } = partitionShimConfigs(configs);
+  for (const entry of shimEntries) {
+    if (entry.tools) {
+      registerToolSet(entry.config, entry.tools);
+    } else if (entry.error) {
+      errors.push(entry.error);
+    }
+  }
+
   const connectionResults = await Promise.allSettled(
-    configs.map(async (config) => {
+    transportConfigs.map(async (config) => {
       try {
         await ensureOAuth(userId, config, teamId);
       } catch (authError) {
@@ -349,15 +477,7 @@ export const openMcpTools = async (
 
     try {
       const toolSet = await client.tools();
-      let toolCount = 0;
-
-      for (const [toolName, tool] of Object.entries(toolSet)) {
-        const prefixedName = `mcp${MCP_TOOL_NAME_SEPARATOR}${config.name}${MCP_TOOL_NAME_SEPARATOR}${toolName}`;
-        allTools[prefixedName] = tool as AI.Tool;
-        toolCount++;
-      }
-
-      serverSummaries.push({ name: config.name, toolCount });
+      registerToolSet(config, toolSet as Record<string, AI.Tool>);
     } catch (toolError) {
       classifyError(config, toolError);
     }

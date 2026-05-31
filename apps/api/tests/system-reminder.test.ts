@@ -93,7 +93,7 @@ describe("buildSystemReminder", () => {
     expect(result).toContain("- mercury: banking (14 tools)");
 
     expect(result).toContain("<available_mcp_presets>");
-    expect(result).toContain("/mcp-add <name>");
+    expect(result).toContain("`/mcp-add linear`");
     expect(result).toContain("- linear: project management");
     expect(result).toContain("- sentry: error tracking");
 
@@ -102,6 +102,16 @@ describe("buildSystemReminder", () => {
     )?.[0];
     expect(availableSection).toBeDefined();
     expect(availableSection).not.toContain("- mercury:");
+  });
+
+  it("flags token-only presets with the API-key invocation hint", () => {
+    const result = buildSystemReminder({});
+    expect(result).toContain(
+      "rippling: hr, employees, leave (requires API key)",
+    );
+    expect(result).toContain("`/mcp-add rippling <api-key>`");
+    // OAuth presets keep the bare invocation
+    expect(result).toContain("`/mcp-add linear`");
   });
 
   it("dedupes off presets across multi-instance connections (e.g. linear_personal)", () => {

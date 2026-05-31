@@ -14,6 +14,12 @@ export interface McpPreset {
   // surfaced first without removing the preset from `/mcp-add` or other
   // entry points).
   hiddenByDefault?: boolean;
+  // Identifier into MCP_SHIMS. When set, Pookie does NOT open an MCP
+  // transport against `url`; instead it builds tools locally from the
+  // shim's REST wrappers. The agent still sees them as `mcp_<name>_*`
+  // tools so prompts, search routing, and system reminders treat the
+  // integration uniformly with real MCP servers.
+  shim?: string;
 }
 
 export const MCP_PRESETS: Record<string, McpPreset> = {
@@ -235,6 +241,36 @@ export const MCP_PRESETS: Record<string, McpPreset> = {
       "search the web for best practices on slack bot onboarding",
     ],
   },
+  rippling: {
+    name: "rippling",
+    displayName: "Rippling",
+    url: "https://api.rippling.com",
+    description: "hr, employees, leave",
+    authType: "token",
+    tokenHelpUrl: "https://developer.rippling.com/",
+    shim: "rippling",
+    // Subset deliberately excludes the three heaviest paginated calls
+    // (list_employees_including_terminated, list_leave_balances,
+    // get_leave_balance). The search subagent runs sequential
+    // explorations and these endpoints can return tens of thousands of
+    // tokens of JSON — the main agent can still call them when the
+    // user explicitly asks about former employees or PTO balances.
+    searchTools: [
+      "list_employees",
+      "get_employee",
+      "list_leave_requests",
+      "get_current_company",
+      "get_departments",
+      "get_teams",
+      "get_levels",
+      "get_company_leave_types",
+      "get_current_user",
+    ],
+    exampleQueries: [
+      "who's out on leave this week according to rippling?",
+      "list everyone in the engineering department in rippling",
+    ],
+  },
 };
 
 const resolveByPrefix = <T>(
@@ -260,3 +296,6 @@ export const resolvePreset = (name: string): McpPreset | undefined =>
 
 export const getPresetDisplayName = (preset: McpPreset): string =>
   preset.displayName ?? preset.name;
+
+export const resolveShimName = (serverName: string): string | undefined =>
+  resolvePreset(serverName)?.shim;

@@ -306,9 +306,14 @@ const handleAdd = async (
     const result = await tryRegister(event.user.userId, config, teamId);
 
     if (result.connected) {
+      const presetDisplay = preset ? getPresetDisplayName(preset) : serverName;
+      const sharedKeyWarning =
+        scope.kind === "global" && preset?.shim
+          ? `\n\n⚠️ *${serverName}* runs at *global* scope, so every workspace member's questions will hit ${presetDisplay} using this single API key. Anyone whose query the agent routes here gets visibility limited only by the key's own scopes. If that's not the intent, remove with \`/mcp-remove ${serverName} --global\` and add it as personal scope (default) or to specific channels with \`--channel\` instead.`
+          : "";
       await reply(
         event,
-        `connected to *${serverName}* (${scopeLabel(scope)}) — ${result.toolCount} tool${result.toolCount === 1 ? "" : "s"} available.`,
+        `connected to *${serverName}* (${scopeLabel(scope)}) — ${result.toolCount} tool${result.toolCount === 1 ? "" : "s"} available.${sharedKeyWarning}`,
       );
     } else if (result.authorizationUrl) {
       const authorizationStartUrl = await createAuthorizationStartUrl(
